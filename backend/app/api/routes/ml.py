@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.mappers import ml_backtest_to_schema, ml_model_run_to_schema, ml_prediction_to_schema
 from app.repositories.assets import get_asset
-from app.repositories.ml import get_latest_prediction, list_backtest_results, list_model_runs
+from app.repositories.ml import get_latest_prediction, list_backtest_results, list_model_runs, get_all_active_model_runs
 from app.schemas.ml import (
     MLBacktestResponse,
     MLDatasetBuildResponse,
@@ -19,6 +19,7 @@ from app.schemas.ml import (
     MLTrainRequest,
 )
 from app.services.ml_foundation import build_training_dataset, dataset_stats, explain_prediction, run_backtest, score_asset, set_ml_mode, status, train_model, train_all_targets
+from app.services.ml_models.registry import AVAILABLE_MODELS
 
 router = APIRouter(tags=["ml"])
 
@@ -57,11 +58,50 @@ def train(payload: MLTrainRequest, db: Session = Depends(get_db)) -> MLModelRunR
 
 @router.post("/ml/models/train-all")
 def train_all(db: Session = Depends(get_db)) -> list[dict]:
-    """Trenuje modele dla wszystkich obsługiwanych targetów."""
+    """Trenuje wszystkie dostępne typy modeli dla każdego aktywa × targetu."""
     try:
         return train_all_targets(db)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Błąd treningu: {exc}")
+
+
+@router.get("/ml/models/available")
+def available_models() -> dict:
+    """Zwraca listę dostępnych typów modeli (zainstalowane pakiety)."""
+    return {"available": AVAILABLE_MODELS}
+
+
+@router.get("/ml/models/comparison")
+def model_comparison(target_name: str = "target_up_5d", db: Session = Depends(get_db)) -> list[dict]:
+    """
+    Zwraca porównanie metryk dla wszystkich aktywnych modeli,
+    pogrupowane po aktywie i typie modelu.
+    """
+    import json as _json
+    from app.repositories.assets import list_assets
+    from app.schemas.ml import ML_TARGETS
+
+    result = []
+    for asset in list_assets(db):
+        for run in get_all_active_model_runs(db, target_name, asset_id=asset.id):
+            try:
+                metrics = _json.loads(run.metrics_json)
+            except Exception:
+                metrics = {}
+            result.append({
+                "asset_id": asset.id,
+                "asset_name": asset.name,
+                "model_name": run.model_name,
+                "target_name": run.target_name,
+                "accuracy": metrics.get("accuracy", 0.0),
+                "precision": metrics.get("precision", 0.0),
+                "recall": metrics.get("recall", 0.0),
+                "f1": metrics.get("f1", 0.0),
+                "avg_probability_up": metrics.get("avg_probability_up", 0.5),
+                "train_rows": metrics.get("train_rows", run.dataset_rows),
+                "trained_at": run.trained_at.isoformat() if run.trained_at else None,
+            })
+    return result
 
 
 @router.get("/ml/models", response_model=list[MLModelRunResponse])

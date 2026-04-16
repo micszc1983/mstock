@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Brain,
@@ -48,6 +48,7 @@ import type {
   ThesisQualitySummary,
   WalkForwardBacktest,
   Watchlist,
+  MLModelComparison,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -131,6 +132,8 @@ export default function App() {
     null
   );
   const [mlExplanation, setMlExplanation] = useState<MLExplanation | null>(null);
+  const [mlComparison, setMlComparison] = useState<MLModelComparison[]>([]);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [recommendations, setRecommendations] = useState<AssetRecommendation[]>([]);
   const [dataQuality, setDataQuality] = useState<DataQualityReport | null>(null);
   const [priceHistory, setPriceHistory] = useState<PriceBar[]>([]);
@@ -143,6 +146,7 @@ export default function App() {
     sector: "", price_symbol: "", news_symbol: "", news_term: "", metal_price_fn: "",
   });
   const [mlActiveTarget, setMlActiveTarget] = useState<string>("target_up_5d");
+  const [cmpSort, setCmpSort] = useState<{ col: string; dir: 1 | -1 }>({ col: "asset_id", dir: 1 });
   const [strategyComparison, setStrategyComparison] =
     useState<StrategyComparison | null>(null);
   const [walkForwardResult, setWalkForwardResult] =
@@ -232,6 +236,8 @@ export default function App() {
         currentMlModels,
         currentMlBacktests,
         currentMlDatasetStats,
+        currentMlComparison,
+        currentAvailableModels,
         currentStrategyComparison,
         currentAllComparisons,
         currentRecommendations,
@@ -266,6 +272,8 @@ export default function App() {
         api.mlModels().catch(() => []),
         api.mlBacktests().catch(() => []),
         api.mlDatasetStats().catch(() => null),
+        api.mlComparison(mlActiveTarget).catch(() => []),
+        api.mlAvailableModels().catch(() => ({ available: [] })),
         api.latestHeuristicVsMl(selectedAsset).catch(() => null),
         api.allHeuristicVsMl().catch(() => []),
         api.recommendations().catch(() => []),
@@ -295,6 +303,8 @@ export default function App() {
       setMlModelsState(currentMlModels);
       setMlBacktestsState(currentMlBacktests);
       setMlDatasetStats(currentMlDatasetStats);
+      setMlComparison(currentMlComparison);
+      setAvailableModels(currentAvailableModels?.available ?? []);
       setStrategyComparison(currentStrategyComparison);
       setAllComparisons(currentAllComparisons);
       setLastRefreshedAt(new Date());
@@ -727,7 +737,7 @@ export default function App() {
         </button>
         <button className="secondary-button" onClick={trainAllMlNow}>
           <Brain size={16} />
-          Trenuj wszystkie targety
+          Trenuj wszystkie modele{availableModels.length > 0 ? ` (${availableModels.length})` : ""}
         </button>
         <button className="secondary-button" onClick={runMlBacktestNow}>
           <GitCompareArrows size={16} />
@@ -868,21 +878,45 @@ export default function App() {
           ))}
         </div>
 
-        <div className="grid-3">
-          {/* ── Panel: status ogólny ── */}
-          <Panel title="Stan ML">
-            <MetaRow label="tryb" value={mlStatus?.ml_mode ?? "—"} />
-            <MetaRow label="wszystkich wierszy" value={String(mlStatus?.dataset_rows ?? 0)} />
-            <MetaRow label="min do treningu" value={String(mlStatus?.min_training_rows ?? 0)} />
-            <MetaRow label="gotowy do treningu" value={String(mlStatus?.ready_for_training ?? false)} />
-            <div style={{ marginTop: "0.5rem", fontSize: "0.78rem", color: "var(--text-2)" }}>
-              Dataset stats: 1d={mlDatasetStats?.labeled_rows_1d ?? 0} &nbsp;
-              5d={mlDatasetStats?.labeled_rows_5d ?? 0} &nbsp;
-              20d={mlDatasetStats?.labeled_rows_20d ?? 0} &nbsp;
-              teza={mlDatasetStats?.thesis_success_rows ?? 0}
-            </div>
-          </Panel>
+        {/* ── Stan ML — kompaktowy pasek info ── */}
+        <div style={{
+          display: "flex", flexWrap: "wrap", gap: "1.2rem", alignItems: "center",
+          padding: "0.55rem 0.9rem", borderRadius: "8px", marginBottom: "1rem",
+          background: "var(--bg-card)", border: "1px solid var(--border)", fontSize: "0.8rem",
+        }}>
+          <span title="Aktywny tryb: ml lub heuristic">
+            <span style={{ color: "var(--text-2)" }}>tryb </span>
+            <strong style={{ color: mlStatus?.ml_enabled ? "#16a34a" : "var(--text)" }}>{mlStatus?.ml_mode ?? "—"}</strong>
+          </span>
+          <span title="Łączna liczba wierszy w datasecie treningowym">
+            <span style={{ color: "var(--text-2)" }}>wierszy </span>
+            <strong>{mlStatus?.dataset_rows ?? 0}</strong>
+            <span style={{ color: "var(--text-3)" }}> / min {mlStatus?.min_training_rows ?? 0}</span>
+          </span>
+          <span title="Oznaczone wiersze per horyzont (ile rekordów ma uzupełniony target)">
+            <span style={{ color: "var(--text-2)" }}>oznaczone </span>
+            <span title="target_up_1d">1d: <strong>{mlDatasetStats?.labeled_rows_1d ?? 0}</strong></span>
+            {" · "}
+            <span title="target_up_5d">5d: <strong>{mlDatasetStats?.labeled_rows_5d ?? 0}</strong></span>
+            {" · "}
+            <span title="target_up_20d">20d: <strong>{mlDatasetStats?.labeled_rows_20d ?? 0}</strong></span>
+            {" · "}
+            <span title="target_thesis_success">teza: <strong>{mlDatasetStats?.thesis_success_rows ?? 0}</strong></span>
+          </span>
+          {availableModels.length > 0 && (
+            <span title="Typy modeli dostępne do treningu (zainstalowane pakiety)">
+              <span style={{ color: "var(--text-2)" }}>dostępne modele </span>
+              <strong>{availableModels.map(m => ({ logistic_regression:"LR", random_forest:"RF", xgboost:"XGB", lstm:"LSTM" }[m] ?? m)).join(", ")}</strong>
+            </span>
+          )}
+          <span title={mlStatus?.ready_for_training ? "Wystarczająco danych do treningu" : "Zbyt mało danych — zbieraj przez scheduler"}>
+            {mlStatus?.ready_for_training
+              ? <span style={{ color: "#16a34a" }}>✓ gotowy do treningu</span>
+              : <span style={{ color: "var(--text-3)" }}>· zbieranie danych…</span>}
+          </span>
+        </div>
 
+        <div className="grid-2">
           {/* ── Panel: predykcja + wyjaśnienie ── */}
           <Panel title={`Predykcja ML — ${ML_TARGETS.find(t => t.value === mlActiveTarget)?.label ?? mlActiveTarget}`}>
             {mlExplanation ? (
@@ -964,7 +998,124 @@ export default function App() {
               }))}
             />
           </Panel>
+
         </div>
+
+        {/* ── Panel: porównanie modeli (pełna szerokość, modele jako kolumny) ── */}
+        {(() => {
+          const MODEL_SHORT: Record<string, string> = {
+            logistic_regression: "LR", random_forest: "RF", xgboost: "XGB", lstm: "LSTM",
+          };
+          const MODEL_LONG: Record<string, string> = {
+            logistic_regression: "Logistic Regression — szybki model liniowy, interpretowalny",
+            random_forest: "Random Forest — 300 drzew decyzyjnych, odporny na szum",
+            xgboost: "XGBoost — gradient boosting, najlepszy dla danych tabelarycznych",
+            lstm: "LSTM (PyTorch) — sieć rekurencyjna, wymaga >60 sekwencji (~4 lata danych dziennych)",
+          };
+          const filtered = mlComparison.filter(r => r.target_name === mlActiveTarget);
+          const modelTypes = [...new Set(filtered.map(r => r.model_name))].sort();
+          // pivot: asset → { model → metrics }
+          const byAsset: Record<string, Record<string, typeof filtered[0]>> = {};
+          for (const r of filtered) {
+            if (!byAsset[r.asset_id]) byAsset[r.asset_id] = {};
+            byAsset[r.asset_id][r.model_name] = r;
+          }
+          type PRow = { asset_id: string; maxRows: number; [k: string]: number | string };
+          const pivotRows: PRow[] = Object.entries(byAsset).map(([assetId, models]) => {
+            const row: PRow = { asset_id: assetId, maxRows: 0 };
+            for (const mn of modelTypes) {
+              const m = models[mn];
+              const s = MODEL_SHORT[mn] ?? mn;
+              row[`${s}_acc`] = m ? m.accuracy : -1;
+              row[`${s}_f1`]  = m ? m.f1       : -1;
+              if (m && m.train_rows > (row.maxRows as number)) row.maxRows = m.train_rows;
+            }
+            return row;
+          });
+
+          const sortFn = (a: PRow, b: PRow): number => {
+            const av = a[cmpSort.col], bv = b[cmpSort.col];
+            if (typeof av === "string") return cmpSort.dir * av.localeCompare(bv as string);
+            return cmpSort.dir * ((bv as number) - (av as number));
+          };
+          const sorted = [...pivotRows].sort(sortFn);
+
+          const thClick = (col: string) =>
+            setCmpSort(prev => ({ col, dir: prev.col === col ? (-prev.dir as 1 | -1) : -1 }));
+          const sortArrow = (col: string) =>
+            cmpSort.col === col ? (cmpSort.dir === -1 ? " ▼" : " ▲") : "";
+
+          const thStyle: React.CSSProperties = {
+            cursor: "pointer", userSelect: "none",
+            padding: "0.35rem 0.5rem", fontSize: "0.74rem",
+            fontWeight: 600, color: "var(--text-2)", textAlign: "right" as const,
+            whiteSpace: "nowrap", borderBottom: "1px solid var(--border)",
+            background: "var(--bg-card)",
+          };
+          const tdStyle = (val: number): React.CSSProperties => ({
+            padding: "0.3rem 0.5rem", fontSize: "0.78rem", textAlign: "right",
+            color: val < 0 ? "var(--text-3)" : val >= 0.55 ? "#16a34a" : val >= 0.5 ? "var(--text)" : "#dc2626",
+            fontWeight: val >= 0.55 ? 600 : 400,
+          });
+
+          const colGroups: { col: string; label: string; tooltip: string }[] = [];
+          for (const mn of modelTypes) {
+            const s = MODEL_SHORT[mn] ?? mn;
+            const long = MODEL_LONG[mn] ?? mn;
+            colGroups.push({ col: `${s}_acc`, label: `${s} Acc`, tooltip: `${long}\n\nAccuracy = (TP+TN)/(wszystkie). Jak często model ma rację.` });
+            colGroups.push({ col: `${s}_f1`,  label: `${s} F1`,  tooltip: `${long}\n\nF1 = 2·Prec·Recall/(Prec+Recall). Lepszy od Accuracy przy niezbalansowanych klasach.` });
+          }
+
+          return (
+            <Panel title="Porównanie modeli">
+              {filtered.length === 0 ? (
+                <p className="long-text">Brak wytrenowanych modeli. Kliknij „Trenuj wszystkie modele" po zebraniu danych.</p>
+              ) : (
+                <div className="table-wrap" style={{ maxHeight: "22rem", overflowY: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ ...thStyle, textAlign: "left" }} onClick={() => thClick("asset_id")}
+                          title="Symbol aktywa — kliknij aby sortować">
+                          Aktywo{sortArrow("asset_id")}
+                        </th>
+                        {colGroups.map(({ col, label, tooltip }) => (
+                          <th key={col} style={thStyle} onClick={() => thClick(col)} title={tooltip}>
+                            {label}{sortArrow(col)}
+                          </th>
+                        ))}
+                        <th style={thStyle} onClick={() => thClick("maxRows")}
+                          title="Liczba wierszy treningowych (80% datasetu)">
+                          Wierszy{sortArrow("maxRows")}
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map(row => (
+                        <tr key={row.asset_id} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", fontWeight: 600 }}>
+                            {(row.asset_id as string).toUpperCase()}
+                          </td>
+                          {colGroups.map(({ col }) => {
+                            const v = row[col] as number;
+                            return (
+                              <td key={col} style={tdStyle(v)}>
+                                {v < 0 ? "—" : `${(v * 100).toFixed(1)}%`}
+                              </td>
+                            );
+                          })}
+                          <td style={{ padding: "0.3rem 0.5rem", fontSize: "0.78rem", textAlign: "right", color: "var(--text-2)" }}>
+                            {row.maxRows}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Panel>
+          );
+        })()}
       </Section>
 
       <Section

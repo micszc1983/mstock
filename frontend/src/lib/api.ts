@@ -30,6 +30,7 @@ import type {
   EnsembleSignal,
   DataQualityReport,
   MLExplanation,
+  MLModelComparison,
   Watchlist,
 } from "./types";
 
@@ -348,4 +349,12 @@ export const api = {
     fetchJson<MLExplanation>(
       `${_activeBase}/assets/${assetId}/ml/explain?target_name=${encodeURIComponent(targetName)}`
     ),
+
+  mlComparison: (targetName = "target_up_5d") =>
+    fetchJson<MLModelComparison[]>(
+      `${_activeBase}/ml/models/comparison?target_name=${encodeURIComponent(targetName)}`
+    ),
+
+  mlAvailableModels: () =>
+    fetchJson<{ available: string[] }>(`${_activeBase}/ml/models/available`),
 };

@@ -11,6 +11,12 @@ pytest>=8.0.0,<9.0.0
 reportlab>=4.1.0,<5.0.0
 scikit-learn>=1.4.0,<2.0.0
 joblib>=1.3.0,<2.0.0
+xgboost>=2.0.0,<3.0.0
+
+# ── Opcjonalne: LSTM (PyTorch) ───────────────────────────────────────────────
+# Zainstaluj aby włączyć model LSTM:
+#   sudo .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0.0
 
 # ── Opcjonalne: lepsza jakość NLP ───────────────────────────────────────────
 # Zainstaluj aby włączyć FinBERT i klasyfikator narracji oparty na embeddingach.

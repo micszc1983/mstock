@@ -184,6 +184,20 @@ export type MLBacktest = {
   result_json: string;
 };
 
+export type MLModelComparison = {
+  asset_id: string;
+  asset_name: string;
+  model_name: string;
+  target_name: string;
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  avg_probability_up: number;
+  train_rows: number;
+  trained_at: string | null;
+};
+
 export type MLPrediction = {
   asset_id: string;
   snapshot_at: string;

@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from statistics import mean
+from typing import Dict
 
-import joblib
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -18,6 +16,7 @@ from app.repositories.ml import (
     count_training_rows,
     delete_training_row_for_timestamp,
     get_active_model_run,
+    get_all_active_model_runs,
     get_latest_prediction,
     get_setting,
     insert_backtest_result,
@@ -91,14 +90,34 @@ _FEATURE_NAMES = [
     # Kontekst rynkowy (SPY)
     "spy_return_5d",
     "alpha_vs_spy_5d",
+    # Dane makroekonomiczne (VIX, Treasury, DXY)
+    "vix_level",
+    "vix_change_5d",
+    "treasury_10y",
+    "dxy_return_5d",
+    # Siła sektora (ETF: SOXX dla półprzewodników, QQQ dla tech/AI)
+    "sector_return_5d",
+    "sector_vs_spy_5d",
 ]
+
+# Mapowanie asset → sektor ETF w naszej bazie
+_SECTOR_ETF_MAP: Dict[str, str] = {
+    # Półprzewodniki → SOXX
+    "nvda": "soxx", "amd": "soxx", "avgo": "soxx",
+    # Szeroki tech/AI → QQQ
+    "aapl": "qqq", "msft": "qqq", "googl": "qqq", "amzn": "qqq",
+    "meta": "qqq", "tsla": "qqq", "orcl": "qqq", "pltr": "qqq",
+    "botz": "qqq", "aiq":  "qqq",
+    # ETF-y same w sobie — porównaj ze sobą
+    "qqq":  "qqq", "soxx": "soxx",
+    # GPW i metale — brak sektorowego ETF w naszej bazie, fallback = SPY (sector=0)
+}
 
 
 def _feature_vector(db: Session, asset_id: str) -> tuple[dict | None, object | None]:
     from app.repositories.prices import list_prices
     from app.mappers import price_to_schema
-    from app.services.technical_indicators import compute_all, fetch_spy_returns
-    from datetime import date as _date
+    from app.services.technical_indicators import compute_all, fetch_spy_returns, fetch_macro_data
 
     feature = get_latest_feature_snapshot(db, asset_id)
     if feature is None:
@@ -115,7 +134,20 @@ def _feature_vector(db: Session, asset_id: str) -> tuple[dict | None, object | N
 
     snap_date = ensure_utc(feature.snapshot_at).date()
     spy_returns = fetch_spy_returns(settings.twelvedata_api_key) if settings.twelvedata_api_key else {}
-    tech = compute_all(closes, volumes, spy_returns, snap_date, asset_return_5d=None)
+    macro_data  = fetch_macro_data()
+
+    # Ceny sektora ETF
+    sector_closes: list = []
+    sector_etf = _SECTOR_ETF_MAP.get(asset_id)
+    if sector_etf:
+        sector_prices = sorted(
+            [price_to_schema(p) for p in list_prices(db, sector_etf)],
+            key=lambda p: ensure_utc(p.timestamp)
+        )[-260:]
+        sector_closes = [p.close for p in sector_prices]
+
+    tech = compute_all(closes, volumes, spy_returns, snap_date, asset_return_5d=None,
+                       macro_data=macro_data, sector_closes=sector_closes)
 
     vec = {
         "trend_score":           feature.trend_score,
@@ -145,14 +177,34 @@ def build_training_dataset(db: Session) -> MLDatasetBuildResponse:
     """
     from app.repositories.prices import list_prices
     from app.mappers import price_to_schema
-    from app.services.technical_indicators import compute_all, fetch_spy_returns
+    from app.services.technical_indicators import compute_all, fetch_spy_returns, fetch_macro_data
 
-    # Pobierz SPY raz dla całego datasetu
+    # Pobierz dane zewnętrzne raz dla całego datasetu
     spy_returns = fetch_spy_returns(settings.twelvedata_api_key) if settings.twelvedata_api_key else {}
     if spy_returns:
         print(f"[ml] SPY returns loaded: {len(spy_returns)} dni")
     else:
         print("[ml] SPY returns niedostępne — alpha_vs_spy_5d = 0")
+
+    macro_data = fetch_macro_data()
+    if macro_data:
+        print(f"[ml] Dane makro załadowane: {len(macro_data)} dni (VIX, Treasury, DXY)")
+    else:
+        print("[ml] Dane makro niedostępne — vix/treasury/dxy = 0")
+
+    # Preload cen ETF sektora (do sił sektorowych) — raz dla wszystkich aktywów
+    sector_price_map: Dict[str, Dict] = {}  # etf_id → {date: close}
+    for etf_id in set(_SECTOR_ETF_MAP.values()):
+        etf_prices = sorted(
+            [price_to_schema(p) for p in list_prices(db, etf_id)],
+            key=lambda p: ensure_utc(p.timestamp)
+        )
+        if etf_prices:
+            sector_price_map[etf_id] = {
+                ensure_utc(p.timestamp).date(): p.close for p in etf_prices
+            }
+    if sector_price_map:
+        print(f"[ml] Ceny sektora ETF załadowane: {list(sector_price_map.keys())}")
 
     built = 0
     for asset in list_assets(db):
@@ -248,10 +300,19 @@ def build_training_dataset(db: Session) -> MLDatasetBuildResponse:
                             ret_5d = outcome.realized_return_pct
                             targets["target_thesis_success"] = int(outcome.was_directionally_correct)
 
+            # Ceny sektora ETF do snap_date (okno 260 dni)
+            sector_closes: list = []
+            sector_etf = _SECTOR_ETF_MAP.get(asset.id)
+            if sector_etf and sector_etf in sector_price_map:
+                etf_by_date = sector_price_map[sector_etf]
+                etf_dates   = sorted(d for d in etf_by_date if d <= snap_date)[-260:]
+                sector_closes = [etf_by_date[d] for d in etf_dates]
+
             # Wskaźniki techniczne obliczane z okna cenowego do snap_date
             window_closes  = all_closes[:idx + 1]
             window_volumes = all_volumes[:idx + 1]
-            tech = compute_all(window_closes, window_volumes, spy_returns, snap_date, ret_5d)
+            tech = compute_all(window_closes, window_volumes, spy_returns, snap_date, ret_5d,
+                               macro_data=macro_data, sector_closes=sector_closes)
 
             vec = {**base_vec, **tech}
 
@@ -327,31 +388,39 @@ def _count_labeled(db: Session, target_name: str) -> int:
     return db.scalar(_sel(_func.count()).select_from(MLTrainingRowORM).where(col.isnot(None))) or 0
 
 
-def train_all_targets(db: Session, model_name: str = "logistic_regression") -> list:
+def train_all_targets(db: Session) -> list:
     """
-    Trenuje osobny model dla każdego aktywa × targetu.
-    Używa class_weight='balanced' aby korygować nierównomierny rozkład klas.
-    Minimum: ml_min_training_rows wierszy z labelem dla danego aktywa.
+    Trenuje wszystkie dostępne typy modeli dla każdego aktywa × targetu.
+    Każdy model (LR, RF, XGBoost, LSTM) trenowany niezależnie — aktywne równolegle.
     """
+    from app.services.ml_models.registry import AVAILABLE_MODELS
     results = []
     assets = list_assets(db)
-    for asset in assets:
-        for target in ML_TARGETS:
-            rows = list_training_rows_for_target(db, target, asset_id=asset.id)
-            if len(rows) < settings.ml_min_training_rows:
-                results.append({
-                    "asset": asset.id, "target": target, "skipped": True,
-                    "reason": f"za mało danych: {len(rows)}/{settings.ml_min_training_rows}",
-                })
-                continue
-            try:
-                row = train_model(db, target_name=target, model_name=model_name, asset_id=asset.id)
-                results.append({
-                    "asset": asset.id, "target": target, "skipped": False,
-                    "model_run_id": row.id, "dataset_rows": row.dataset_rows,
-                })
-            except Exception as exc:
-                results.append({"asset": asset.id, "target": target, "skipped": True, "reason": str(exc)})
+    models_to_train = AVAILABLE_MODELS if AVAILABLE_MODELS else ["logistic_regression"]
+    print(f"[ml] Trenowanie modeli: {models_to_train}")
+
+    for model_name in models_to_train:
+        for asset in assets:
+            for target in ML_TARGETS:
+                rows = list_training_rows_for_target(db, target, asset_id=asset.id)
+                if len(rows) < settings.ml_min_training_rows:
+                    results.append({
+                        "model": model_name, "asset": asset.id, "target": target,
+                        "skipped": True,
+                        "reason": f"za mało danych: {len(rows)}/{settings.ml_min_training_rows}",
+                    })
+                    continue
+                try:
+                    row = train_model(db, target_name=target, model_name=model_name, asset_id=asset.id)
+                    results.append({
+                        "model": model_name, "asset": asset.id, "target": target,
+                        "skipped": False, "model_run_id": row.id, "dataset_rows": row.dataset_rows,
+                    })
+                except Exception as exc:
+                    results.append({
+                        "model": model_name, "asset": asset.id, "target": target,
+                        "skipped": True, "reason": str(exc),
+                    })
     return results
 
 
@@ -372,6 +441,8 @@ def train_model(
     model_name: str = "logistic_regression",
     asset_id: str | None = None,
 ):
+    from app.services.ml_models.registry import train_single_model as _train_single
+
     rows = list_training_rows_for_target(db, target_name, asset_id=asset_id)
     if len(rows) < settings.ml_min_training_rows:
         raise ValueError(f"Not enough rows to train. Need at least {settings.ml_min_training_rows}, got {len(rows)}")
@@ -380,31 +451,21 @@ def train_model(
     test_rows = rows[split:] if split < len(rows) else rows[-max(1, len(rows)//5):]
     X_train, y_train, feature_names = _xy(train_rows, target_name)
     X_test, y_test, _ = _xy(test_rows, target_name)
-    if model_name != "logistic_regression":
-        raise ValueError("Only logistic_regression is implemented in this foundation layer.")
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.pipeline import Pipeline
-    model = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(max_iter=1000, class_weight="balanced", C=0.5)),
-    ])
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
-    probs = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else [0.5] * len(X_test)
+
+    asset_suffix = f"_{asset_id}" if asset_id else ""
+    model_path = _models_dir() / f"{model_name}_{target_name}{asset_suffix}.joblib"
+
+    model_metrics = _train_single(
+        model_name, X_train, y_train, X_test, y_test, feature_names, str(model_path)
+    )
     metrics = {
-        "accuracy": float(accuracy_score(y_test, preds)),
-        "precision": float(precision_score(y_test, preds, zero_division=0)),
-        "recall": float(recall_score(y_test, preds, zero_division=0)),
-        "f1": float(f1_score(y_test, preds, zero_division=0)),
+        **model_metrics,
         "train_rows": len(train_rows),
         "test_rows": len(test_rows),
         "feature_names": feature_names,
-        "avg_probability_up": float(mean(probs)) if len(probs) else 0.0,
         "asset_id": asset_id,
     }
-    asset_suffix = f"_{asset_id}" if asset_id else ""
-    model_path = _models_dir() / f"{model_name}_{target_name}{asset_suffix}.joblib"
-    joblib.dump({"model": model, "feature_names": feature_names}, model_path)
+
     row = insert_model_run(
         db, model_name=model_name, target_name=target_name,
         dataset_rows=len(rows), metrics_json=json.dumps(metrics, ensure_ascii=False),
@@ -416,6 +477,9 @@ def train_model(
 
 
 def run_backtest(db: Session, target_name: str = "target_up_5d"):
+    import joblib
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
     active = get_active_model_run(db, target_name)
     if active is None:
         raise ValueError("No active model for target")
@@ -446,27 +510,51 @@ def run_backtest(db: Session, target_name: str = "target_up_5d"):
 
 
 def score_asset(db: Session, asset_id: str, target_name: str = "target_up_5d"):
-    active = get_active_model_run(db, target_name, asset_id=asset_id)
-    if active is None:
+    from app.services.ml_models.registry import predict_proba_single
+
+    active_runs = get_all_active_model_runs(db, target_name, asset_id=asset_id)
+    if not active_runs:
+        # Fallback: szukaj globalnych modeli bez asset_id
+        active_runs = get_all_active_model_runs(db, target_name, asset_id=None)
+    if not active_runs:
         return None
+
     vec, feature = _feature_vector(db, asset_id)
     if vec is None or feature is None:
         return None
-    bundle = joblib.load(active.model_path)
-    model = bundle["model"]
-    feature_names = bundle["feature_names"]
-    X = [[float(vec[k]) for k in feature_names]]
-    prob_up = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else 0.5
+
+    # Buduj historyczne X dla LSTM (ostatnie 25 wierszy + aktualny snapshot)
+    hist_rows = list_training_rows_for_target(db, target_name, asset_id=asset_id)[-25:]
+    X_full = [json.loads(r.feature_json) for r in hist_rows] + [vec]
+
+    probs = []
+    models_used = []
+    for run in active_runs:
+        try:
+            p = predict_proba_single(run.model_name, run.model_path, X_full)
+            probs.append(p)
+            models_used.append(run.model_name)
+        except Exception as exc:
+            print(f"[ml] score_asset {run.model_name}: {exc}")
+
+    if not probs:
+        return None
+
+    prob_up = float(mean(probs))
     label = "up" if prob_up >= 0.5 else "down"
     row = insert_prediction(
         db,
         asset_id=asset_id,
         snapshot_at=feature.snapshot_at,
-        model_run_id=active.id,
+        model_run_id=active_runs[0].id,
         target_name=target_name,
         probability_up=prob_up,
         predicted_label=label,
-        raw_json=json.dumps({"features": vec, "probability_up": prob_up}, ensure_ascii=False),
+        raw_json=json.dumps({
+            "features": vec, "probability_up": prob_up,
+            "models_used": models_used,
+            "per_model_probs": dict(zip(models_used, probs)),
+        }, ensure_ascii=False),
     )
     db.commit()
     db.refresh(row)
@@ -513,7 +601,16 @@ def explain_prediction(
     to coef[i] * feature_value[i]. Sumaryczny log-odds -> prawdopodobieństwo przez sigmoid.
     Nie wymaga SHAP ani dodatkowych zależności.
     """
-    active = get_active_model_run(db, target_name, asset_id=asset_id)
+    import joblib
+
+    # Szukaj aktywnego modelu logistycznego do wyjaśnienia (ma coef_)
+    active = None
+    for run in get_all_active_model_runs(db, target_name, asset_id=asset_id):
+        if run.model_name == "logistic_regression":
+            active = run
+            break
+    if active is None:
+        active = get_active_model_run(db, target_name, asset_id=asset_id)
     if active is None:
         return None
 
@@ -525,8 +622,10 @@ def explain_prediction(
     model = bundle["model"]
     feature_names: list[str] = bundle["feature_names"]
 
-    # Pipeline: wyciągnij koeficjenty z kroku "clf"
+    # Pipeline: wyciągnij koeficjenty z kroku "clf" (tylko regresja logistyczna)
     clf = model.named_steps["clf"] if hasattr(model, "named_steps") else model
+    if not hasattr(clf, "coef_"):
+        return None
     coefs = clf.coef_[0]          # shape (n_features,)
     feature_values = [float(vec.get(name, 0.0)) for name in feature_names]
 

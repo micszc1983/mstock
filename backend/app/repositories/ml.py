@@ -58,7 +58,11 @@ def insert_model_run(
     asset_id: str | None = None,
 ) -> MLModelRunORM:
     if is_active:
-        q = select(MLModelRunORM).where(MLModelRunORM.target_name == target_name)
+        # Dezaktywuj tylko poprzednie wersje tego samego modelu (nie innych typów)
+        q = select(MLModelRunORM).where(
+            MLModelRunORM.model_name == model_name,
+            MLModelRunORM.target_name == target_name,
+        )
         if asset_id is not None:
             q = q.where(MLModelRunORM.asset_id == asset_id)
         for row in db.scalars(q).all():
@@ -102,6 +106,19 @@ def get_active_model_run(
                MLModelRunORM.is_active == True)
         .order_by(MLModelRunORM.trained_at.desc()).limit(1)
     )
+
+
+def get_all_active_model_runs(
+    db: Session, target_name: str, asset_id: str | None = None
+) -> list[MLModelRunORM]:
+    """Zwraca wszystkie aktywne modele dla danego targetu (jeden per model_name)."""
+    q = select(MLModelRunORM).where(
+        MLModelRunORM.target_name == target_name,
+        MLModelRunORM.is_active == True,  # noqa: E712
+    )
+    if asset_id is not None:
+        q = q.where(MLModelRunORM.asset_id == asset_id)
+    return list(db.scalars(q.order_by(MLModelRunORM.trained_at.desc())).all())
 
 
 def insert_backtest_result(db: Session, model_run_id: int, result_json: str) -> MLBacktestResultORM:
