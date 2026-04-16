@@ -1,0 +1,63 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Bazy danych ───────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Sekrety i konfiguracja lokalna ────────────────────────────────────────────
+.env
+# .env.example — NIE ignoruj, zawiera dokumentację zmiennych bez sekretów
+
+# ── ML modele (generowane automatycznie przez backend) ────────────────────────
+backend/ml_models/
+# Jeśli chcesz śledzić modele — usuń powyższą linię
+
+# ── Logi ─────────────────────────────────────────────────────────────────────
+*.log
+backend.log
+frontend.log
+.run/
+
+# ── Raporty generowane ────────────────────────────────────────────────────────
+backend/generated_reports/
+
+# ── Node.js ───────────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Testy i narzędzia ─────────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Systemy operacyjne ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
