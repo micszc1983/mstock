@@ -98,7 +98,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncCounter, setSyncCounter] = useState(0);
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [mlWorking, setMlWorking] = useState<string | null>(null); // null = idle, string = opis operacji
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
 
@@ -159,10 +161,17 @@ export default function App() {
   const [usdPlnRate, setUsdPlnRate] = useState<number | null>(null);
 
   useEffect(() => {
+    // Próba 1: NBP API
     fetch("https://api.nbp.pl/api/exchangerates/rates/a/usd/?format=json")
       .then(r => r.json())
       .then(d => { const rate = d.rates?.[0]?.mid; if (rate) setUsdPlnRate(rate); })
-      .catch(() => {});
+      .catch(() => {
+        // Próba 2: open.er-api.com (darmowy, bez klucza)
+        fetch("https://open.er-api.com/v6/latest/USD")
+          .then(r => r.json())
+          .then(d => { const rate = d.rates?.PLN; if (rate) setUsdPlnRate(rate); })
+          .catch(() => {});
+      });
   }, []);
 
   useEffect(() => {
@@ -200,6 +209,7 @@ export default function App() {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
     } finally {
       setSyncing(false);
+      setSyncCounter(n => n + 1);
     }
   }
 
@@ -272,7 +282,10 @@ export default function App() {
         api.mlModels().catch(() => []),
         api.mlBacktests().catch(() => []),
         api.mlDatasetStats().catch(() => null),
-        api.mlComparison(mlActiveTarget).catch(() => []),
+        Promise.all([
+          api.mlComparison("target_up_5d").catch(() => []),
+          api.mlComparison("target_up_20d").catch(() => []),
+        ]).then(([a, b]) => [...a, ...b]),
         api.mlAvailableModels().catch(() => ({ available: [] })),
         api.latestHeuristicVsMl(selectedAsset).catch(() => null),
         api.allHeuristicVsMl().catch(() => []),
@@ -400,43 +413,56 @@ export default function App() {
   }
 
   async function buildMlDatasetNow() {
+    setMlWorking("Budowanie datasetu…");
     try {
       const result = await api.buildMlDataset();
-      setInfo(
-        `Dataset zbudowany: ${result.built_rows} nowych wierszy, łącznie ${result.total_rows}.`
-      );
+      setInfo(`Dataset zbudowany: ${result.built_rows} nowych wierszy, łącznie ${result.total_rows}.`);
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setMlWorking(null);
     }
   }
 
   async function trainMlNow() {
+    const label = ML_TARGETS.find(t => t.value === mlActiveTarget)?.label ?? mlActiveTarget;
+    const models = availableModels.length > 0 ? availableModels : ["logistic_regression"];
+    const modelAbbrs = models.map(m => ({ logistic_regression: "LR", random_forest: "RF", xgboost: "XGB", lstm: "LSTM" }[m] ?? m)).join(", ");
+    setMlWorking(`Trening ${modelAbbrs} — ${label}…`);
     try {
-      const result = await api.trainMlModel(mlActiveTarget, "logistic_regression");
-      setInfo(`Wytrenowano model ${result.model_name} dla celu: ${result.target_name}.`);
+      for (const modelName of models) {
+        await api.trainMlModel(mlActiveTarget, modelName, selectedAsset);
+      }
+      setInfo(`Wytrenowano modele (${modelAbbrs}) dla ${selectedAsset} / ${label}.`);
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setMlWorking(null);
     }
   }
 
   async function trainAllMlNow() {
+    const modelList = availableModels.map(m => ({ logistic_regression:"LR", random_forest:"RF", xgboost:"XGB", lstm:"LSTM" }[m] ?? m)).join(", ");
+    setMlWorking(`Trening wszystkich modeli (${modelList}) — może potrwać kilka minut…`);
     try {
       const results = await api.trainAllMlModels();
-      const trained = results.filter((r: any) => !r.skipped).map((r: any) => r.target);
-      const skipped = results.filter((r: any) => r.skipped).map((r: any) => r.target);
-      setInfo(`Trening wszystkich: wytrenowane=[${trained.join(", ")}], pominięte=[${skipped.join(", ")}].`);
+      const trained = results.filter((r: any) => !r.skipped).length;
+      const skipped = results.filter((r: any) => r.skipped).length;
+      setInfo(`Trening zakończony: ${trained} wytrenowanych, ${skipped} pominiętych (za mało danych).`);
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setMlWorking(null);
     }
   }
 
   async function runMlBacktestNow() {
     try {
-      const result = await api.runMlBacktest(mlActiveTarget);
-      setInfo(`Backtest zapisany (ID modelu: ${result.model_run_id}).`);
+      const result = await api.runMlBacktest(mlActiveTarget, selectedAsset);
+      setInfo(`Backtest zapisany dla ${selectedAsset}.`);
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
@@ -445,7 +471,7 @@ export default function App() {
 
   async function runWalkForwardNow() {
     try {
-      const result = await api.walkForwardBacktest(mlActiveTarget);
+      const result = await api.walkForwardBacktest(mlActiveTarget, selectedAsset);
       setWalkForwardResult(result);
       setInfo("Backtest walk-forward zakończony.");
       await refresh();
@@ -713,6 +739,7 @@ export default function App() {
         repairing={bootstrapping}
         onSync={runSync}
         syncing={syncing}
+        syncCounter={syncCounter}
         lastRefreshedAt={lastRefreshedAt}
         mlStatus={mlStatus}
         mlModels={mlModelsState}
@@ -722,22 +749,33 @@ export default function App() {
       />
 
       {/* Rząd 1 — akcje ML */}
+      {mlWorking && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "0.6rem",
+          padding: "0.45rem 0.8rem", marginBottom: "0.5rem",
+          borderRadius: "8px", background: "var(--bg-subtle)",
+          border: "1px solid var(--border)", fontSize: "0.82rem", color: "var(--text-2)",
+        }}>
+          <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid var(--accent)", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
+          {mlWorking}
+        </div>
+      )}
       <div className="toolbar-row">
         <button className="secondary-button" onClick={toggleMlMode}>
           <WandSparkles size={16} />
           {mlStatus?.ml_enabled ? "Przełącz na heurystykę" : "Przełącz na ML"}
         </button>
-        <button className="secondary-button" onClick={buildMlDatasetNow}>
+        <button className="secondary-button" onClick={buildMlDatasetNow} disabled={!!mlWorking}>
           <Rows3 size={16} />
-          Zbuduj dataset ML
+          {mlWorking?.startsWith("Budowanie") ? "Budowanie…" : "Zbuduj dataset ML"}
         </button>
-        <button className="secondary-button" onClick={trainMlNow}>
+        <button className="secondary-button" onClick={trainMlNow} disabled={!!mlWorking}>
           <Brain size={16} />
-          Trenuj ({ML_TARGETS.find(t => t.value === mlActiveTarget)?.label ?? mlActiveTarget})
+          {mlWorking?.startsWith("Trening ") && !mlWorking?.startsWith("Trening wszystkich") ? "Trenuję…" : `Trenuj modele — ${ML_TARGETS.find(t => t.value === mlActiveTarget)?.label ?? mlActiveTarget}`}
         </button>
-        <button className="secondary-button" onClick={trainAllMlNow}>
+        <button className="secondary-button" onClick={trainAllMlNow} disabled={!!mlWorking}>
           <Brain size={16} />
-          Trenuj wszystkie modele{availableModels.length > 0 ? ` (${availableModels.length})` : ""}
+          {mlWorking?.startsWith("Trening wszystkich") ? "Trenuję…" : `Trenuj wszystkie modele (${availableModels.map(m => ({ logistic_regression:"LR", random_forest:"RF", xgboost:"XGB", lstm:"LSTM" }[m] ?? m)).join(", ") || "—"})`}
         </button>
         <button className="secondary-button" onClick={runMlBacktestNow}>
           <GitCompareArrows size={16} />
@@ -820,6 +858,83 @@ export default function App() {
       {/* ── Historia ceny ── */}
       {selectedMeta && (
         <div style={{ marginBottom: "24px" }}>
+
+          {/* ── Pasek sygnałów ── */}
+          {(() => {
+            const rec    = recommendations.find(r => r.asset_id === selectedAsset) ?? null;
+            const recKey = rec?.recommendation === "KUP" ? "buy" : rec?.recommendation === "SPRZEDAJ" ? "sell" : "hold";
+            const mlDir  = mlPrediction?.predicted_label?.toLowerCase() ?? null;
+            const mlKey  = mlDir === "up" ? "buy" : mlDir === "down" ? "sell" : "hold";
+            const ensAct = ensembleSignal?.action ?? null;
+            const ensKey = ensAct === "KUP" ? "buy" : ensAct === "SPRZEDAJ" ? "sell" : "hold";
+
+            const colors: Record<string, { bg: string; border: string; text: string }> = {
+              buy:  { bg: "rgba(22,163,74,0.11)",  border: "rgba(22,163,74,0.38)",  text: "#16a34a" },
+              sell: { bg: "rgba(220,38,38,0.10)",  border: "rgba(220,38,38,0.38)",  text: "#dc2626" },
+              hold: { bg: "var(--bg-card)",         border: "var(--border)",          text: "var(--text-2)" },
+            };
+
+            const mlLabel   = mlActiveTarget === "target_up_5d" ? "5d" : mlActiveTarget === "target_up_20d" ? "20d" : "teza";
+            const mlVerdict = mlDir === "up" ? "WZROST" : mlDir === "down" ? "SPADEK" : "—";
+
+            function SignalBox({ colorKey, title, verdict, detail, tooltip }: {
+              colorKey: string; title: string; verdict: string; detail: string; tooltip: string;
+            }) {
+              const c = colors[colorKey] ?? colors.hold;
+              return (
+                <div title={tooltip} style={{
+                  flex: "1 1 0", borderRadius: "8px", padding: "9px 14px",
+                  background: c.bg, border: `1.5px solid ${c.border}`,
+                  cursor: "default", minWidth: 0,
+                }}>
+                  <div style={{ fontSize: "0.63rem", fontWeight: 600, letterSpacing: "0.09em",
+                    textTransform: "uppercase", color: "var(--text-3)", marginBottom: "3px" }}>
+                    {title}
+                  </div>
+                  <div style={{ fontSize: "1.25rem", fontWeight: 700, lineHeight: 1, color: c.text }}>
+                    {verdict}
+                  </div>
+                  <div style={{ fontSize: "0.70rem", marginTop: "5px", color: "var(--text-2)" }}>
+                    {detail}
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
+                <SignalBox
+                  colorKey={recKey}
+                  title="Rekomendacja"
+                  verdict={rec?.recommendation ?? "—"}
+                  detail={rec ? `score ${rec.composite_score} · pewność: ${rec.confidence_label}` : "brak danych"}
+                  tooltip={rec?.rationale ?? "Brak danych rekomendacji"}
+                />
+                <SignalBox
+                  colorKey={mlKey}
+                  title={`ML · ${mlLabel}`}
+                  verdict={mlVerdict}
+                  detail={mlPrediction ? `p(wzrost) = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "brak predykcji"}
+                  tooltip={mlPrediction ? `Cel: ${mlPrediction.target_name} | p(up) = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "Brak predykcji ML — wytrenuj modele"}
+                />
+                <SignalBox
+                  colorKey={ensKey}
+                  title="Ensemble ważony"
+                  verdict={ensAct ?? "—"}
+                  detail={ensembleSignal
+                    ? `p=${ensembleSignal.final_probability_up.toFixed(1)}% · konsensus: ${ensembleSignal.consensus}`
+                    : "brak danych"}
+                  tooltip={ensembleSignal?.rationale ?? "Brak sygnału ensemble"}
+                />
+              </div>
+            );
+          })()}
+
+          {displayCurrency === "PLN" && selectedOrigCurrency !== "PLN" && usdPlnRate == null && (
+            <div style={{ fontSize: "0.75rem", color: "var(--warn, #b45309)", marginBottom: "4px", paddingLeft: "4px" }}>
+              Brak kursu USD/PLN — wykres w oryginalnej walucie. Sprawdź połączenie z internetem.
+            </div>
+          )}
           <PriceHistoryChart bars={displayPriceHistory} symbol={selectedMeta.symbol} currency={displayLabel(selectedOrigCurrency)} />
         </div>
       )}
@@ -979,8 +1094,38 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            ) : (
-              <p className="long-text">Brak predykcji. Wytrenuj model i kliknij &ldquo;Score ML&rdquo;.</p>
+            ) : mlPrediction ? (() => {
+              const label = mlPrediction.predicted_label;
+              const probUp = mlPrediction.probability_up;
+              const isUp = label === "up";
+              const col = isUp ? "#16a34a" : "#dc2626";
+              const bg = isUp ? "rgba(22,163,74,0.08)" : "rgba(220,38,38,0.08)";
+              let modelsUsed: string[] = [];
+              try {
+                const raw = JSON.parse(mlPrediction.raw_json ?? "{}");
+                modelsUsed = raw.models_used ?? [];
+              } catch { /* ignore */ }
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.6rem 0.8rem", borderRadius: "8px", background: bg, border: `1.5px solid ${col}` }}>
+                    <span style={{ fontSize: "1.5rem", fontWeight: 700, color: col }}>{isUp ? "▲" : "▼"}</span>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: "0.9rem", color: col }}>
+                        {isUp ? "BULLISH" : "BEARISH"}{" — "}{(probUp * 100).toFixed(1)}% p(up)
+                      </div>
+                      <div style={{ fontSize: "0.8rem", color: "var(--text-2)", marginTop: "0.2rem" }}>
+                        {new Date(mlPrediction.snapshot_at).toLocaleString("pl-PL")}
+                        {modelsUsed.length > 0 && ` · modele: ${modelsUsed.join(", ")}`}
+                      </div>
+                    </div>
+                  </div>
+                  <p style={{ fontSize: "0.78rem", color: "var(--text-3)", margin: 0 }}>
+                    Brak szczegółowego wyjaśnienia — wytrenuj model LR aby zobaczyć wkłady cech.
+                  </p>
+                </div>
+              );
+            })() : (
+              <p className="long-text">Brak predykcji. Wytrenuj model i kliknij &ldquo;Przelicz predykcję ML&rdquo;.</p>
             )}
           </Panel>
 
@@ -1002,6 +1147,7 @@ export default function App() {
         </div>
 
         {/* ── Panel: porównanie modeli (pełna szerokość, modele jako kolumny) ── */}
+        <div style={{ marginTop: "1rem" }}>
         {(() => {
           const MODEL_SHORT: Record<string, string> = {
             logistic_regression: "LR", random_forest: "RF", xgboost: "XGB", lstm: "LSTM",
@@ -1020,7 +1166,7 @@ export default function App() {
             if (!byAsset[r.asset_id]) byAsset[r.asset_id] = {};
             byAsset[r.asset_id][r.model_name] = r;
           }
-          type PRow = { asset_id: string; maxRows: number; [k: string]: number | string };
+          type PRow = { asset_id: string; maxRows: number; [k: string]: number | string | boolean };
           const pivotRows: PRow[] = Object.entries(byAsset).map(([assetId, models]) => {
             const row: PRow = { asset_id: assetId, maxRows: 0 };
             for (const mn of modelTypes) {
@@ -1028,6 +1174,7 @@ export default function App() {
               const s = MODEL_SHORT[mn] ?? mn;
               row[`${s}_acc`] = m ? m.accuracy : -1;
               row[`${s}_f1`]  = m ? m.f1       : -1;
+              row[`${s}_global`] = m ? (m.is_global ?? false) : false;
               if (m && m.train_rows > (row.maxRows as number)) row.maxRows = m.train_rows;
             }
             return row;
@@ -1071,7 +1218,12 @@ export default function App() {
               {filtered.length === 0 ? (
                 <p className="long-text">Brak wytrenowanych modeli. Kliknij „Trenuj wszystkie modele" po zebraniu danych.</p>
               ) : (
-                <div className="table-wrap" style={{ maxHeight: "22rem", overflowY: "auto" }}>
+                <div style={{ maxHeight: "22rem", overflowY: "auto", overflowX: "auto" }}>
+                  {mlComparison.some(r => r.is_global) && (
+                    <div style={{ fontSize: "0.72rem", color: "var(--text-3)", marginBottom: "0.3rem" }}>
+                      * model globalny (wytrenowany na wszystkich aktywach łącznie, brak modelu per-aktywo)
+                    </div>
+                  )}
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
@@ -1098,9 +1250,12 @@ export default function App() {
                           </td>
                           {colGroups.map(({ col }) => {
                             const v = row[col] as number;
+                            const modelShort = col.replace(/_acc$|_f1$/, "");
+                            const isGlobal = row[`${modelShort}_global`] as boolean;
                             return (
-                              <td key={col} style={tdStyle(v)}>
-                                {v < 0 ? "—" : `${(v * 100).toFixed(1)}%`}
+                              <td key={col} style={{ ...tdStyle(v), opacity: isGlobal ? 0.65 : 1 }}
+                                title={isGlobal ? "Model globalny (nie per-aktywo)" : undefined}>
+                                {v < 0 ? "—" : `${(v * 100).toFixed(1)}%${isGlobal ? "*" : ""}`}
                               </td>
                             );
                           })}
@@ -1116,6 +1271,7 @@ export default function App() {
             </Panel>
           );
         })()}
+        </div>
       </Section>
 
       <Section
@@ -1305,7 +1461,7 @@ export default function App() {
           <p className="long-text">Brak danych. Kliknij Odśwież aby załadować rekomendacje.</p>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.81rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.78rem", tableLayout: "auto" }}>
               <thead>
                 <tr style={{ borderBottom: "2px solid var(--border)" }}>
                   {[
@@ -1326,9 +1482,9 @@ export default function App() {
                     ["Alerty","active_alerts","Liczba aktywnych alertów. ⚠ = alert krytyczny (fragility, degradacja prognozy). Wpływa negatywnie na wynik kompozytowy."],
                   ].map(([label, key, tip]) => (
                     <SortTh key={key} tableId="recommendations" colKey={key} label={label} tip={tip} side="bottom"
-                      style={{ padding: "0.4rem 0.5rem", fontSize: "0.75rem", color: "var(--text-2)" }} />
+                      style={{ padding: "0.3rem 0.35rem", fontSize: "0.72rem", color: "var(--text-2)", whiteSpace: "nowrap" }} />
                   ))}
-                  <th style={{ padding: "0.4rem 0.5rem", fontSize: "0.75rem", color: "var(--text-2)" }}>Sygnały</th>
+                  <th style={{ padding: "0.3rem 0.35rem", fontSize: "0.72rem", color: "var(--text-2)" }}>Sygnały</th>
                 </tr>
               </thead>
               <tbody>
@@ -1340,7 +1496,7 @@ export default function App() {
                     const col = val > neutral ? "#16a34a" : "#dc2626";
                     return (
                       <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                        <div style={{ width: "40px", height: "6px", background: "var(--bg-subtle)", borderRadius: "3px", overflow: "hidden" }}>
+                        <div style={{ width: "28px", height: "5px", background: "var(--bg-subtle)", borderRadius: "3px", overflow: "hidden" }}>
                           <div style={{ width: `${Math.min(pct, 100).toFixed(0)}%`, height: "100%", background: col, borderRadius: "3px" }} />
                         </div>
                         <span style={{ color: val > neutral ? "#16a34a" : "#dc2626" }}>{val.toFixed(1)}</span>
@@ -1359,7 +1515,7 @@ export default function App() {
                       }}
                       onClick={() => setSelectedAsset(r.asset_id)}
                     >
-                      <td style={{ padding: "0.4rem 0.5rem", fontWeight: 600 }}>
+                      <td style={{ padding: "0.25rem 0.35rem", fontWeight: 600 }}>
                         {r.symbol}
                         <div style={{ fontSize: "0.68rem", color: "var(--text-2)", fontWeight: 400 }}>{r.name}</div>
                       </td>
@@ -1665,19 +1821,65 @@ export default function App() {
           </Panel>
 
           <Panel title="Walk-forward backtest">
-            {walkForwardResult ? (
-              <>
-                <MetaRow
-                  label="ID modelu"
-                  value={String(walkForwardResult.model_run_id)}
-                />
-                <MetaRow
-                  label="Data"
-                  value={new Date(walkForwardResult.created_at).toLocaleString("pl-PL")}
-                />
-                <p className="long-text">{walkForwardResult.result_json}</p>
-              </>
-            ) : (
+            {walkForwardResult ? (() => {
+              let parsed: any = null;
+              try { parsed = JSON.parse(walkForwardResult.result_json); } catch { /* ignore */ }
+              const models: Record<string, any> = parsed?.models ?? {};
+              const ens = parsed?.ensemble ?? null;
+              const MODEL_SHORT: Record<string, string> = {
+                logistic_regression: "LR", random_forest: "RF", xgboost: "XGB", lstm: "LSTM",
+              };
+              const fmtPct = (v: number | undefined) => v != null ? `${(v * 100).toFixed(1)}%` : "—";
+              const metricColor = (v: number | undefined): React.CSSProperties =>
+                !v ? {} : { color: v >= 0.55 ? "#16a34a" : v >= 0.5 ? "inherit" : "#dc2626", fontWeight: v >= 0.55 ? 600 : 400 };
+              const thS: React.CSSProperties = { padding: "0.3rem 0.5rem", fontSize: "0.74rem", fontWeight: 600, color: "var(--text-2)", textAlign: "left", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" };
+              const tdS: React.CSSProperties = { padding: "0.3rem 0.5rem", fontSize: "0.78rem", textAlign: "right" };
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--text-3)" }}>
+                    {new Date(walkForwardResult.created_at).toLocaleString("pl-PL")}
+                    {parsed?.asset_id && ` · ${parsed.asset_id.toUpperCase()}`}
+                    {parsed?.total_rows && ` · ${parsed.total_rows} wierszy`}
+                    {ens?.windows && ` · ${ens.windows} okien`}
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ ...thS, textAlign: "left" }}>Model</th>
+                          <th style={{ ...thS, textAlign: "right" }}>Accuracy</th>
+                          <th style={{ ...thS, textAlign: "right" }}>Precision</th>
+                          <th style={{ ...thS, textAlign: "right" }}>Recall</th>
+                          <th style={{ ...thS, textAlign: "right" }}>F1</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(models).map(([name, m]: [string, any]) => (
+                          <tr key={name} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ ...tdS, textAlign: "left", fontWeight: 500 }}>
+                              {MODEL_SHORT[name] ?? name}{m.is_global ? <span style={{ color: "var(--text-3)", fontWeight: 400 }}> *</span> : null}
+                            </td>
+                            <td style={{ ...tdS, ...metricColor(m.avg_accuracy) }}>{fmtPct(m.avg_accuracy)}</td>
+                            <td style={{ ...tdS, ...metricColor(m.avg_precision) }}>{fmtPct(m.avg_precision)}</td>
+                            <td style={{ ...tdS, ...metricColor(m.avg_recall) }}>{fmtPct(m.avg_recall)}</td>
+                            <td style={{ ...tdS, ...metricColor(m.avg_f1) }}>{fmtPct(m.avg_f1)}</td>
+                          </tr>
+                        ))}
+                        {ens && ens.windows > 0 && (
+                          <tr style={{ borderTop: "2px solid var(--border)", background: "var(--bg-subtle)" }}>
+                            <td style={{ ...tdS, textAlign: "left", fontWeight: 700 }}>Ensemble</td>
+                            <td style={{ ...tdS, ...metricColor(ens.avg_accuracy) }}>{fmtPct(ens.avg_accuracy)}</td>
+                            <td style={{ ...tdS, ...metricColor(ens.avg_precision) }}>{fmtPct(ens.avg_precision)}</td>
+                            <td style={{ ...tdS, ...metricColor(ens.avg_recall) }}>{fmtPct(ens.avg_recall)}</td>
+                            <td style={{ ...tdS, ...metricColor(ens.avg_f1) }}>{fmtPct(ens.avg_f1)}</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })() : (
               <p className="long-text">
                 Uruchom walk-forward backtest, aby zobaczyć wynik.
               </p>

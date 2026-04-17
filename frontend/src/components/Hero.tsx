@@ -17,6 +17,7 @@ type Props = {
   mlModels: MLModelRun[];
   onSync: () => void;
   syncing: boolean;
+  syncCounter?: number;
   displayCurrency: "original" | "PLN";
   setDisplayCurrency: (v: "original" | "PLN") => void;
   usdPlnRate: number | null;
@@ -101,7 +102,7 @@ function useSchedulerCountdown(apiBase: string) {
   return secondsLeft;
 }
 
-function useProviderStatus(apiBase: string) {
+function useProviderStatus(apiBase: string, syncCounter?: number) {
   const [status, setStatus] = useState<ProvidersStatus | null>(null);
   useEffect(() => {
     function fetch_status() {
@@ -114,6 +115,17 @@ function useProviderStatus(apiBase: string) {
     const id = setInterval(fetch_status, 120_000); // co 2 min
     return () => clearInterval(id);
   }, [apiBase]);
+  // Re-fetch natychmiast po sync
+  useEffect(() => {
+    if (syncCounter === undefined || syncCounter === 0) return;
+    const id = setTimeout(() => {
+      fetch(`${apiBase}/admin/provider-status`)
+        .then(r => r.json())
+        .then(d => setStatus(d))
+        .catch(() => {});
+    }, 1500); // 1.5s opóźnienie żeby log zdążył się zapisać
+    return () => clearTimeout(id);
+  }, [syncCounter, apiBase]);
   return status;
 }
 
@@ -220,13 +232,13 @@ export function Hero({
   onRefresh, onRepair,
   loading, repairing,
   lastRefreshedAt, mlStatus, mlModels,
-  onSync, syncing,
+  onSync, syncing, syncCounter,
   displayCurrency, setDisplayCurrency, usdPlnRate,
 }: Props) {
   const [dark, setDark] = useDarkMode();
   const dbActive      = useDbPulse(loading);
   const countdown     = useSchedulerCountdown(apiBase);
-  const providers     = useProviderStatus(apiBase);
+  const providers     = useProviderStatus(apiBase, syncCounter);
   const isSyncing     = useSyncStatus(apiBase, syncing);
 
   const [, tick] = useState(0);

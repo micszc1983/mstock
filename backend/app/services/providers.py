@@ -587,6 +587,154 @@ def fetch_stock_prices_from_rapidapi(symbol: str) -> List[PricePoint]:
     return points
 
 
+# ══════════════════════════════════════════════════════════════════
+#  GPW API (gpw-api.p.rapidapi.com) — dedykowane API dla GPW
+#  Subskrypcja: plan BASIC (free), daily quota ~100 req/dzień
+#  Ticker format: "PKN" (bez .WA)
+# ══════════════════════════════════════════════════════════════════
+
+_RAPIDAPI_GPW_HOST = "gpw-api.p.rapidapi.com"
+_RAPIDAPI_GPW_BASE = f"https://{_RAPIDAPI_GPW_HOST}"
+
+
+def fetch_gpw_prices_from_rapidapi(ticker: str) -> List[PricePoint]:
+    """
+    Pobiera historię cen z GPW API przez RapidAPI.
+    ticker: symbol GPW bez .WA, np. "PKN", "CDR", "PKO"
+    """
+    if not settings.rapidapi_api_key:
+        raise HTTPException(status_code=400, detail="Brak RAPIDAPI_API_KEY w .env")
+
+    # Usuń sufiks .WA jeśli przekazano
+    clean_ticker = ticker.upper().replace(".WA", "").replace(".WAW", "")
+
+    today = datetime.now(timezone.utc)
+    date_to   = today.strftime("%Y-%m-%d")
+    date_from = (today - timedelta(days=730)).strftime("%Y-%m-%d")
+
+    headers = {
+        "x-rapidapi-key":  settings.rapidapi_api_key,
+        "x-rapidapi-host": _RAPIDAPI_GPW_HOST,
+        "Accept": "application/json",
+    }
+
+    points: List[PricePoint] = []
+
+    with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
+        # Próbuj /api/history — główny endpoint historyczny
+        resp = client.get(
+            f"{_RAPIDAPI_GPW_BASE}/api/history",
+            headers=headers,
+            params={"ticker": clean_ticker, "from": date_from, "to": date_to},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    if isinstance(data, dict) and data.get("message"):
+        raise HTTPException(status_code=502, detail=f"GPW API: {data['message']}")
+
+    # Normalizuj odpowiedź — może być dict z 'data' lub lista bezpośrednio
+    rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        # Niektóre API zwracają dict {date: {open,high,low,close,volume}}
+        if isinstance(data, dict):
+            rows = [{"date": k, **v} for k, v in data.items() if isinstance(v, dict)]
+        else:
+            rows = []
+
+    for bar in rows:
+        if not isinstance(bar, dict):
+            continue
+        try:
+            date_str = (bar.get("date") or bar.get("Date") or bar.get("datetime") or
+                        bar.get("time") or bar.get("sessionDate") or "")
+            if not date_str:
+                continue
+            ts = datetime.fromisoformat(str(date_str)[:10]).replace(tzinfo=timezone.utc)
+            close = float(bar.get("close") or bar.get("Close") or bar.get("closingPrice") or 0)
+            if close == 0:
+                continue
+            points.append(PricePoint(
+                timestamp=ts,
+                open=float(bar.get("open")   or bar.get("Open")   or close),
+                high=float(bar.get("high")   or bar.get("High")   or close),
+                low=float(bar.get("low")     or bar.get("Low")    or close),
+                close=close,
+                volume=float(bar.get("volume") or bar.get("Volume") or bar.get("turnover") or 0),
+            ))
+        except Exception:
+            continue
+
+    if not points:
+        raise HTTPException(status_code=502, detail=f"GPW API: brak danych dla {clean_ticker}")
+
+    points.sort(key=lambda p: p.timestamp)
+    return points
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Yahoo Finance v8 API — darmowe dane historyczne bez klucza API
+#  Działa dla GPW (.WA), US stocks i innych giełd globalnych
+#  Brak limitu dziennego, ~2 lata historii
+# ══════════════════════════════════════════════════════════════════
+
+def fetch_gpw_prices_from_stooq(ticker: str) -> List[PricePoint]:
+    """
+    Pobiera historię cen z Yahoo Finance v8 API (bez klucza API).
+    ticker: symbol GPW z .WA, np. "PKN.WA", "KGH.WA"
+    Nazwa zachowana dla kompatybilności z sync.py.
+    """
+    # Upewnij się że ticker ma .WA
+    symbol = ticker.upper()
+    if not symbol.endswith(".WA"):
+        symbol = symbol + ".WA"
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5y"
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+
+    with httpx.Client(timeout=settings.sync_timeout_seconds, follow_redirects=True) as client:
+        resp = client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    result = data.get("chart", {}).get("result", [])
+    if not result:
+        err = data.get("chart", {}).get("error") or "brak danych"
+        raise ValueError(f"Yahoo Finance: {err} dla {symbol}")
+
+    timestamps = result[0].get("timestamp", [])
+    quote = result[0].get("indicators", {}).get("quote", [{}])[0]
+    opens   = quote.get("open",   [])
+    highs   = quote.get("high",   [])
+    lows    = quote.get("low",    [])
+    closes  = quote.get("close",  [])
+    volumes = quote.get("volume", [])
+
+    points: List[PricePoint] = []
+    for i, ts_epoch in enumerate(timestamps):
+        try:
+            close = closes[i] if i < len(closes) else None
+            if close is None:
+                continue
+            ts = datetime.fromtimestamp(ts_epoch, tz=timezone.utc)
+            points.append(PricePoint(
+                timestamp=ts,
+                open=float(opens[i])   if i < len(opens)   and opens[i]   is not None else close,
+                high=float(highs[i])   if i < len(highs)   and highs[i]   is not None else close,
+                low=float(lows[i])     if i < len(lows)    and lows[i]    is not None else close,
+                close=float(close),
+                volume=float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0,
+            ))
+        except Exception:
+            continue
+
+    if not points:
+        raise ValueError(f"Yahoo Finance: sparsowano 0 wierszy dla {symbol}")
+
+    points.sort(key=lambda p: p.timestamp)
+    return points
+
+
 def fetch_news_from_alpaca(symbol: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
     """
     Pobiera newsy z Alpaca dla podanego symbolu.

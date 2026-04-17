@@ -476,34 +476,56 @@ def train_model(
     return row
 
 
-def run_backtest(db: Session, target_name: str = "target_up_5d"):
+def run_backtest(db: Session, target_name: str = "target_up_5d", asset_id: str | None = None):
     import joblib
     from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-    active = get_active_model_run(db, target_name)
-    if active is None:
+    # Per-asset modele mają priorytet; uzupełnij globalnymi dla brakujących typów
+    per_asset = get_all_active_model_runs(db, target_name, asset_id=asset_id)
+    global_runs = get_all_active_model_runs(db, target_name, asset_id=None)
+    per_asset_names = {r.model_name for r in per_asset}
+    active_runs = list(per_asset) + [r for r in global_runs if r.model_name not in per_asset_names]
+    if not active_runs:
         raise ValueError("No active model for target")
-    bundle = joblib.load(active.model_path)
-    model = bundle["model"]
-    feature_names = bundle["feature_names"]
-    rows = list_training_rows_for_target(db, target_name)
-    X, y = [], []
-    for row in rows:
-        features = json.loads(row.feature_json)
-        X.append([float(features[k]) for k in feature_names])
-        y.append(int(getattr(row, target_name)))
-    preds = model.predict(X)
-    probs = model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else [0.5] * len(X)
+
+    rows = list_training_rows_for_target(db, target_name, asset_id=asset_id)
+    if not rows:
+        raise ValueError("No training rows for backtest")
+
+    per_model_results = {}
+    for active in active_runs:
+        bundle = joblib.load(active.model_path)
+        model = bundle["model"]
+        feature_names = bundle["feature_names"]
+        X, y = [], []
+        for row in rows:
+            features = json.loads(row.feature_json)
+            X.append([float(features.get(k, 0.0)) for k in feature_names])
+            y.append(int(getattr(row, target_name)))
+        preds = model.predict(X)
+        probs = model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else [0.5] * len(X)
+        per_model_results[active.model_name] = {
+            "accuracy":  float(accuracy_score(y, preds)),
+            "precision": float(precision_score(y, preds, zero_division=0)),
+            "recall":    float(recall_score(y, preds, zero_division=0)),
+            "f1":        float(f1_score(y, preds, zero_division=0)),
+            "avg_probability_up": float(mean(probs)) if len(probs) else 0.0,
+            "is_global": active.asset_id is None,
+        }
+
     result = {
         "target_name": target_name,
+        "asset_id": asset_id,
         "rows": len(rows),
-        "accuracy": float(accuracy_score(y, preds)),
-        "precision": float(precision_score(y, preds, zero_division=0)),
-        "recall": float(recall_score(y, preds, zero_division=0)),
-        "f1": float(f1_score(y, preds, zero_division=0)),
-        "avg_probability_up": float(mean(probs)) if len(probs) else 0.0,
+        "models": per_model_results,
+        # Metryki ensemble (średnia z modeli)
+        "accuracy":  round(float(mean(v["accuracy"]  for v in per_model_results.values())), 4),
+        "precision": round(float(mean(v["precision"] for v in per_model_results.values())), 4),
+        "recall":    round(float(mean(v["recall"]    for v in per_model_results.values())), 4),
+        "f1":        round(float(mean(v["f1"]        for v in per_model_results.values())), 4),
+        "avg_probability_up": round(float(mean(v["avg_probability_up"] for v in per_model_results.values())), 4),
     }
-    row = insert_backtest_result(db, active.id, json.dumps(result, ensure_ascii=False))
+    row = insert_backtest_result(db, active_runs[0].id, json.dumps(result, ensure_ascii=False))
     db.commit()
     db.refresh(row)
     return row
@@ -512,10 +534,12 @@ def run_backtest(db: Session, target_name: str = "target_up_5d"):
 def score_asset(db: Session, asset_id: str, target_name: str = "target_up_5d"):
     from app.services.ml_models.registry import predict_proba_single
 
-    active_runs = get_all_active_model_runs(db, target_name, asset_id=asset_id)
-    if not active_runs:
-        # Fallback: szukaj globalnych modeli bez asset_id
-        active_runs = get_all_active_model_runs(db, target_name, asset_id=None)
+    # Zbierz per-asset modele i uzupełnij globalnymi dla brakujących typów
+    per_asset = get_all_active_model_runs(db, target_name, asset_id=asset_id)
+    global_runs = get_all_active_model_runs(db, target_name, asset_id=None)
+    per_asset_names = {r.model_name for r in per_asset}
+    # Per-asset ma priorytet; globalny używany tylko jeśli brak per-asset dla danego modelu
+    active_runs = list(per_asset) + [r for r in global_runs if r.model_name not in per_asset_names]
     if not active_runs:
         return None
 
@@ -604,13 +628,18 @@ def explain_prediction(
     import joblib
 
     # Szukaj aktywnego modelu logistycznego do wyjaśnienia (ma coef_)
+    # 1. Per-asset LR
     active = None
     for run in get_all_active_model_runs(db, target_name, asset_id=asset_id):
         if run.model_name == "logistic_regression":
             active = run
             break
+    # 2. Globalny LR (asset_id IS NULL)
     if active is None:
-        active = get_active_model_run(db, target_name, asset_id=asset_id)
+        for run in get_all_active_model_runs(db, target_name, asset_id=None):
+            if run.model_name == "logistic_regression":
+                active = run
+                break
     if active is None:
         return None
 

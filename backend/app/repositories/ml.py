@@ -111,13 +111,16 @@ def get_active_model_run(
 def get_all_active_model_runs(
     db: Session, target_name: str, asset_id: str | None = None
 ) -> list[MLModelRunORM]:
-    """Zwraca wszystkie aktywne modele dla danego targetu (jeden per model_name)."""
+    """Zwraca aktywne modele per-asset lub globalne (asset_id IS NULL)."""
     q = select(MLModelRunORM).where(
         MLModelRunORM.target_name == target_name,
         MLModelRunORM.is_active == True,  # noqa: E712
     )
     if asset_id is not None:
         q = q.where(MLModelRunORM.asset_id == asset_id)
+    else:
+        # asset_id=None oznacza: tylko globalne modele (bez przypisania do aktywa)
+        q = q.where(MLModelRunORM.asset_id == None)  # noqa: E711
     return list(db.scalars(q.order_by(MLModelRunORM.trained_at.desc())).all())
 
 

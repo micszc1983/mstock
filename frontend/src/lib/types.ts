@@ -196,6 +196,7 @@ export type MLModelComparison = {
   avg_probability_up: number;
   train_rows: number;
   trained_at: string | null;
+  is_global?: boolean;
 };
 
 export type MLPrediction = {

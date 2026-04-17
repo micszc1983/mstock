@@ -266,20 +266,20 @@ export const api = {
 
   trainMlModel: (
     target_name = "target_up_5d",
-    model_name = "logistic_regression"
+    model_name = "logistic_regression",
+    asset_id: string | null = null
   ) =>
     postJson<MLModelRun>(`${_activeBase}/ml/models/train`, {
       target_name,
       model_name,
+      asset_id,
     }),
 
   mlModels: () => fetchJson<MLModelRun[]>(`${_activeBase}/ml/models`),
 
-  runMlBacktest: (target_name = "target_up_5d") =>
+  runMlBacktest: (target_name = "target_up_5d", asset_id?: string) =>
     postJson<MLBacktest>(
-      `${_activeBase}/ml/backtests/run?target_name=${encodeURIComponent(
-        target_name
-      )}`
+      `${_activeBase}/ml/backtests/run?target_name=${encodeURIComponent(target_name)}${asset_id ? `&asset_id=${encodeURIComponent(asset_id)}` : ""}`
     ),
 
   mlBacktests: () => fetchJson<MLBacktest[]>(`${_activeBase}/ml/backtests`),
@@ -298,11 +298,9 @@ export const api = {
       )}`
     ),
 
-  walkForwardBacktest: (target_name = "target_up_5d") =>
+  walkForwardBacktest: (target_name = "target_up_5d", asset_id?: string) =>
     postJson<WalkForwardBacktest>(
-      `${_activeBase}/ml/backtests/walkforward?target_name=${encodeURIComponent(
-        target_name
-      )}`
+      `${_activeBase}/ml/backtests/walkforward?target_name=${encodeURIComponent(target_name)}${asset_id ? `&asset_id=${encodeURIComponent(asset_id)}` : ""}`
     ),
 
   compareHeuristicVsMl: (assetId: string) =>

@@ -15,6 +15,8 @@ from app.services.providers import (
     fetch_stock_prices_from_alpaca,
     fetch_stock_prices_from_massive,
     fetch_stock_prices_from_rapidapi,
+    fetch_gpw_prices_from_rapidapi,
+    fetch_gpw_prices_from_stooq,
     fetch_stock_prices_from_twelvedata,
     fetch_company_news_from_finnhub,
     fetch_metal_prices_from_alpha_vantage,
@@ -62,10 +64,33 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         provider = "unknown"
         is_gpw = symbol.upper().endswith(".WA")
 
-        # ── GPW (.WA): RapidAPI Yahoo Finance → Alpha Vantage ──────────────────
+        # ── GPW (.WA): Yahoo Finance → GPW API → RapidAPI Yahoo Finance → Alpha Vantage ──
         if is_gpw:
-            # 1. RapidAPI Yahoo Finance — obsługuje GPW, 2 lata historii
-            if settings.rapidapi_api_key:
+            # 1. Yahoo Finance v8 — darmowy, bez klucza, bez limitu, 5 lat historii
+            try:
+                provider = "yahoo:v8"
+                points = fetch_gpw_prices_from_stooq(symbol)  # alias: używa Yahoo Finance v8
+                if not points:
+                    raise ValueError("Yahoo Finance zwróciło 0 punktów")
+                print(f"[sync] {asset.id}: Yahoo Finance OK — {len(points)} punktów")
+            except Exception as yahoo_err:
+                log_sync_error(db, asset.id, "prices_yahoo_fallback", str(yahoo_err))
+                points = []
+
+            # 2. GPW API (gpw-api.p.rapidapi.com) — fallback, limit dzienny
+            if not points and settings.rapidapi_api_key:
+                try:
+                    provider = "rapidapi:gpw-api"
+                    points = fetch_gpw_prices_from_rapidapi(symbol)
+                    if not points:
+                        raise ValueError("GPW API zwróciło 0 punktów")
+                    print(f"[sync] {asset.id}: GPW API OK — {len(points)} punktów")
+                except Exception as gpw_err:
+                    log_sync_error(db, asset.id, "prices_gpw_api_fallback", str(gpw_err))
+                    points = []
+
+            # 3. RapidAPI Yahoo Finance — fallback (wymaga subskrypcji yahoo-finance15)
+            if not points and settings.rapidapi_api_key:
                 try:
                     provider = "rapidapi:yahoo-finance"
                     points = fetch_stock_prices_from_rapidapi(symbol)
@@ -76,7 +101,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     log_sync_error(db, asset.id, "prices_rapidapi_fallback", str(rapi_err))
                     points = []
 
-            # 2. Alpha Vantage — fallback dla GPW
+            # 4. Alpha Vantage — fallback dla GPW
             if not points:
                 try:
                     provider = "alphavantage:TIME_SERIES_DAILY"

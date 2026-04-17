@@ -1,7 +1,21 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+
+function useIsDark() {
+  const [dark, setDark] = useState(() =>
+    document.documentElement.getAttribute("data-theme") === "dark"
+  );
+  useEffect(() => {
+    const obs = new MutationObserver(() =>
+      setDark(document.documentElement.getAttribute("data-theme") === "dark")
+    );
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => obs.disconnect();
+  }, []);
+  return dark;
+}
 import {
   Bar, BarChart, CartesianGrid, Cell,
-  Legend, Line, LineChart,
+  Legend, Line, LineChart, ReferenceLine,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import type {
@@ -197,6 +211,10 @@ const RANGES: { label: string; key: PriceRange; days: number | null }[] = [
 
 export function PriceHistoryChart({ bars, symbol, currency = "USD" }: { bars: { timestamp: string; close: number; volume: number }[]; symbol: string; currency?: string }) {
   const [range, setRange] = useState<PriceRange>("1M");
+  const isDark = useIsDark();
+  const tooltipStyle = isDark
+    ? { fontSize: 12, borderRadius: 8, background: "#374151", border: "none", color: "#fff" }
+    : { fontSize: 12, borderRadius: 8 };
 
   if (!bars || bars.length === 0) {
     return (
@@ -296,13 +314,22 @@ export function PriceHistoryChart({ bars, symbol, currency = "USD" }: { bars: { 
           />
           <Tooltip
             formatter={(v: number) => [v.toLocaleString("pl-PL", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + currency, "Kurs zamknięcia"]}
-            contentStyle={{ fontSize: 12, borderRadius: 8 }}
+            contentStyle={tooltipStyle}
           />
+          {data.map((d, i) => (
+            <ReferenceLine
+              key={i}
+              x={d.date}
+              stroke="rgba(128,128,128,0.18)"
+              strokeDasharray="2 4"
+              strokeWidth={1}
+            />
+          ))}
           <Line
-            type="monotone"
+            type="linear"
             dataKey="Cena"
             stroke={lineColor}
-            strokeWidth={2}
+            strokeWidth={1.5}
             dot={false}
             activeDot={{ r: 4 }}
           />

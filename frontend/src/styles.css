@@ -102,9 +102,9 @@ a { color: var(--accent); }
 /* ── Layout ────────────────────────────────────────────────────── */
 .app-shell {
   min-height: 100vh;
-  padding: 72px 24px 32px;
+  padding: 72px 16px 32px;
 }
-.container { max-width: 1320px; margin: 0 auto; }
+.container { max-width: 1600px; margin: 0 auto; }
 
 /* ── Grids ─────────────────────────────────────────────────────── */
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -574,3 +574,5 @@ tbody tr:hover { background: var(--bg-hover); }
 [data-tip][data-tip-side="left"]:hover::after    { transform: translateY(-50%) translateX(0); }
 [data-tip][data-tip-side="right"]:hover::before  { transform: translateY(-50%) translateX(0); }
 [data-tip][data-tip-side="right"]:hover::after   { transform: translateY(-50%) translateX(0); }
+
+@keyframes spin { to { transform: rotate(360deg); } }

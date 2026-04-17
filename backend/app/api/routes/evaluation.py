@@ -14,8 +14,12 @@ router = APIRouter(tags=["evaluation"])
 
 
 @router.post("/ml/backtests/walkforward", response_model=WalkForwardBacktestResponse)
-def walkforward_backtest(target_name: str = "target_up_5d", db: Session = Depends(get_db)) -> WalkForwardBacktestResponse:
-    row = run_walkforward_backtest(db, target_name=target_name)
+def walkforward_backtest(
+    target_name: str = "target_up_5d",
+    asset_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> WalkForwardBacktestResponse:
+    row = run_walkforward_backtest(db, target_name=target_name, asset_id=asset_id)
     return walkforward_backtest_to_schema(row)
 
 

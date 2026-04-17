@@ -64,6 +64,7 @@ class MLDatasetStatsResponse(BaseModel):
 class MLTrainRequest(BaseModel):
     target_name: str = "target_up_5d"
     model_name: str = "logistic_regression"
+    asset_id: str | None = None
 
 
 class MLModelRunResponse(BaseModel):

@@ -30,7 +30,7 @@ from app.repositories.ensemble import (
 )
 from app.repositories.features import get_latest_feature_snapshot
 from app.repositories.forecasts import get_latest_forecasts
-from app.repositories.ml import get_active_model_run, get_latest_prediction
+from app.repositories.ml import get_active_model_run, get_all_active_model_runs, get_latest_prediction
 from app.repositories.outcomes import list_outcomes_for_asset
 from app.schemas.ensemble import (
     EnsembleConfig,
@@ -97,43 +97,49 @@ def _heuristic_vote(db: Session, asset_id: str) -> SignalVote:
 def _ml_vote(db: Session, asset_id: str, target: str, label: str) -> SignalVote:
     pred = get_latest_prediction(db, asset_id, target)
     if pred is None:
-        active = get_active_model_run(db, target)
-        if active is None:
+        # Zbierz per-asset + globalne modele
+        per_asset = get_all_active_model_runs(db, target, asset_id=asset_id)
+        global_runs = get_all_active_model_runs(db, target, asset_id=None)
+        per_asset_names = {r.model_name for r in per_asset}
+        active_runs = list(per_asset) + [r for r in global_runs if r.model_name not in per_asset_names]
+
+        if not active_runs:
             return SignalVote(
                 source=f"ml_{target}", source_label=label,
                 direction="neutral", confidence=0.0, probability_up=50.0,
                 reasoning=f"Brak wytrenowanego modelu dla {target}.",
                 available=False,
             )
-        # Model istnieje ale brak predykcji — wygeneruj on-the-fly
+        # Model istnieje ale brak predykcji — wygeneruj on-the-fly z pełnym feature vectorem
         try:
-            import joblib, json as _json
-            feature = get_latest_feature_snapshot(db, asset_id)
-            decision = get_latest_decision_snapshot(db, asset_id)
-            if feature is None:
-                raise ValueError("brak feature snapshot")
-            bundle = joblib.load(active.model_path)
-            model = bundle["model"]
-            fnames = bundle["feature_names"]
-            vec = {
-                "last_price": feature.last_price,
-                "trend_score": feature.trend_score,
-                "sentiment_score": feature.sentiment_score,
-                "divergence_score": feature.divergence_score,
-                "fragility_score": feature.fragility_score,
-                "narrative_shift_score": feature.narrative_shift_score,
-                "volatility_10d": feature.volatility_10d,
-                "momentum_20d": feature.momentum_20d,
-                "news_count_7d": float(feature.news_count_7d),
-                "forecast_confidence_1d": 50.0,
-                "forecast_up_probability_1d": 50.0,
-                "decision_conviction": decision.conviction_score if decision else 50.0,
-                "decision_risk": decision.risk_score if decision else 50.0,
-                "decision_timing": decision.timing_score if decision else 50.0,
-                "decision_setup_quality": decision.setup_quality_score if decision else 50.0,
-            }
-            X = [[float(vec.get(k, 0.0)) for k in fnames]]
-            prob = float(model.predict_proba(X)[0][1])
+            import json as _json
+            from app.repositories.ml import list_training_rows_for_target
+            from app.services.ml_models.registry import predict_proba_single
+            from statistics import mean as _mean
+
+            # Użyj ostatniego training row jako feature vector (pełny zestaw cech)
+            hist = list_training_rows_for_target(db, target, asset_id=asset_id, limit=26)
+            if not hist:
+                hist = list_training_rows_for_target(db, target, asset_id=None, limit=26)
+            if not hist:
+                raise ValueError("brak danych treningowych dla feature vector")
+
+            X_full = [_json.loads(r.feature_json) for r in hist]
+
+            probs = []
+            model_names = []
+            for run in active_runs:
+                try:
+                    p = predict_proba_single(run.model_name, run.model_path, X_full)
+                    probs.append(p)
+                    model_names.append(run.model_name)
+                except Exception:
+                    pass
+
+            if not probs:
+                raise ValueError("żaden model nie zwrócił predykcji")
+
+            prob = float(_mean(probs))
         except Exception as exc:
             return SignalVote(
                 source=f"ml_{target}", source_label=label,
@@ -143,6 +149,7 @@ def _ml_vote(db: Session, asset_id: str, target: str, label: str) -> SignalVote:
             )
     else:
         prob = pred.probability_up
+        model_names = []
 
     prob_pct = _clamp(prob * 100 if prob <= 1.0 else prob, 0, 100)
     direction = "up" if prob_pct > 52 else "down" if prob_pct < 48 else "neutral"
@@ -153,7 +160,7 @@ def _ml_vote(db: Session, asset_id: str, target: str, label: str) -> SignalVote:
         direction=direction,
         confidence=confidence,
         probability_up=prob_pct,
-        reasoning=f"p(up)={prob_pct:.1f}%, model={active.model_name if 'active' in dir() else 'cached'}",
+        reasoning=f"p(up)={prob_pct:.1f}%" + (f", modele={','.join(model_names)}" if model_names else ", cached"),
         available=True,
     )
 
