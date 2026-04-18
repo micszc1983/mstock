@@ -84,6 +84,8 @@ def update_asset_provider_config(
     row.news_symbol    = payload.news_symbol or None
     row.news_term      = payload.news_term or row.name
     row.metal_price_fn = payload.metal_price_fn or None
+    if payload.currency:
+        row.currency = payload.currency
     if payload.sector:
         row.sector = payload.sector
     if payload.description:

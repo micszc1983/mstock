@@ -64,8 +64,8 @@ def run_walkforward_backtest(db: Session, target_name: str = "target_up_5d", ass
                     import joblib
                     bundle = joblib.load(tmp_path)
                     model = bundle["model"]
-                    preds = model.predict(X_test)
-                    probs = list(model.predict_proba(X_test)[:, 1]) if hasattr(model, "predict_proba") else [0.5] * len(X_test)
+                    preds = [int(p) for p in model.predict(X_test)]
+                    probs = [float(p) for p in model.predict_proba(X_test)[:, 1]] if hasattr(model, "predict_proba") else [0.5] * len(X_test)
                     per_model_results[model_name].append({
                         "train_rows": len(train_rows),
                         "test_rows": len(test_rows),

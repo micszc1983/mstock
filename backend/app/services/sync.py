@@ -19,8 +19,10 @@ from app.services.providers import (
     fetch_gpw_prices_from_stooq,
     fetch_stock_prices_from_twelvedata,
     fetch_company_news_from_finnhub,
+    fetch_company_news_from_finnhub_range,
     fetch_metal_prices_from_alpha_vantage,
     fetch_search_news_from_alpha_vantage,
+    fetch_search_news_from_alpha_vantage_range,
     fetch_stock_prices_from_alpha_vantage,
     fetch_quote_from_finnhub,
 )
@@ -256,3 +258,80 @@ def log_sync_success(db: Session, asset_id: str, sync_type: str, result: SyncRes
 def log_sync_error(db: Session, asset_id: str, sync_type: str, detail: str) -> None:
     add_sync_log(db, asset_id, sync_type, "manual", 0, 0, "error", detail)
     db.commit()
+
+
+def backfill_news_for_asset(db: Session, asset: AssetORM, months_back: int = 12) -> dict:
+    """
+    Pobiera historyczne newsy dla aktywa za ostatnie N miesięcy (domyślnie 12).
+
+    Strategia:
+    - US stocks z news_symbol: Finnhub company-news po ~30-dniowych oknach
+    - Wszystkie aktywa: Alpha Vantage NEWS_SENTIMENT z parametrami time_from/time_to
+
+    Zwraca słownik ze statystykami: inserted, skipped, windows, errors.
+    """
+    from datetime import date, timedelta as _td
+    from app.schemas.common import AssetType as _AT
+
+    legacy = settings.asset_provider_config.get(asset.id, {})
+    news_sym = asset.news_symbol or legacy.get("news_symbol")
+    term = asset.news_term or legacy.get("news_term") or asset.name
+    asset_type = _AT(asset.type)
+
+    inserted = 0
+    skipped = 0
+    errors = []
+
+    today = date.today()
+    start = today - _td(days=months_back * 30)
+
+    # Iteruj po ~60-dniowych oknach żeby nie przekraczać limitów API
+    window_days = 60
+    cursor = start
+    while cursor < today:
+        window_end = min(cursor + _td(days=window_days), today)
+
+        # ── Finnhub company-news (US stocks) ──────────────────────────────────
+        if asset.type == _AT.STOCK.value and news_sym and settings.finnhub_api_key:
+            try:
+                items = fetch_company_news_from_finnhub_range(
+                    news_sym, asset.id, asset_type,
+                    date_from=cursor.isoformat(),
+                    date_to=window_end.isoformat(),
+                )
+                for item in items:
+                    if upsert_news_item(db, item):
+                        inserted += 1
+                    else:
+                        skipped += 1
+                db.commit()
+            except Exception as exc:
+                errors.append(f"finnhub {cursor}→{window_end}: {exc}")
+
+        # ── Alpha Vantage NEWS_SENTIMENT (wszystkie aktywa) ───────────────────
+        if settings.alphavantage_api_key and term:
+            try:
+                time_from = cursor.strftime("%Y%m%dT%H%M")
+                time_to   = window_end.strftime("%Y%m%dT%H%M")
+                items = fetch_search_news_from_alpha_vantage_range(
+                    term, asset.id, asset_type, time_from, time_to,
+                )
+                for item in items:
+                    if upsert_news_item(db, item):
+                        inserted += 1
+                    else:
+                        skipped += 1
+                db.commit()
+            except Exception as exc:
+                errors.append(f"alphavantage {cursor}→{window_end}: {exc}")
+
+        cursor = window_end + _td(days=1)
+
+    return {
+        "asset_id": asset.id,
+        "months_back": months_back,
+        "inserted": inserted,
+        "skipped": skipped,
+        "errors": errors,
+        "detail": f"Backfill zakończony: {inserted} nowych, {skipped} duplikatów, {len(errors)} błędów",
+    }

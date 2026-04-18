@@ -31,6 +31,8 @@ type ProviderState = {
 };
 type ProvidersStatus = Record<"massive" | "twelvedata" | "rapidapi" | "alpaca" | "alphavantage" | "finnhub", ProviderState>;
 
+type AssetSignal = "green" | "red" | "neutral";
+
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
 function useDarkMode() {
@@ -127,6 +129,58 @@ function useProviderStatus(apiBase: string, syncCounter?: number) {
     return () => clearTimeout(id);
   }, [syncCounter, apiBase]);
   return status;
+}
+
+function useAssetSignals(apiBase: string, assets: Asset[], syncCounter?: number): Map<string, AssetSignal> {
+  const [signals, setSignals] = useState<Map<string, AssetSignal>>(new Map());
+
+  async function fetchAll() {
+    const entries = await Promise.all(
+      assets.map(async (a) => {
+        try {
+          const r = await fetch(`${apiBase}/assets/${a.id}/recommendation`);
+          if (!r.ok) return [a.id, "neutral"] as const;
+          const d = await r.json();
+          const rec   = d.recommendation as string | null;
+          const ml    = d.ml_prediction  as string | null;
+          const f5d   = d.forecast_dir_5d  as string | null;
+          const f20d  = d.forecast_dir_20d as string | null;
+          const allGreen =
+            rec   === "KUP"       &&
+            (ml === null || ml   === "up")   &&
+            (f5d === null || f5d  === "up")  &&
+            (f20d === null || f20d === "up") &&
+            ml !== null && f5d !== null && f20d !== null;
+          const allRed =
+            rec   === "SPRZEDAJ"  &&
+            ml    === "down"      &&
+            f5d   === "down"      &&
+            f20d  === "down";
+          return [a.id, allGreen ? "green" : allRed ? "red" : "neutral"] as const;
+        } catch {
+          return [a.id, "neutral"] as const;
+        }
+      })
+    );
+    setSignals(new Map(entries));
+  }
+
+  useEffect(() => {
+    if (assets.length === 0) return;
+    fetchAll();
+    const id = setInterval(fetchAll, 5 * 60_000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, assets]);
+
+  useEffect(() => {
+    if (!syncCounter) return;
+    const id = setTimeout(fetchAll, 3000);
+    return () => clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncCounter]);
+
+  return signals;
 }
 
 // ── Formatters ───────────────────────────────────────────────────────────────
@@ -240,6 +294,7 @@ export function Hero({
   const countdown     = useSchedulerCountdown(apiBase);
   const providers     = useProviderStatus(apiBase, syncCounter);
   const isSyncing     = useSyncStatus(apiBase, syncing);
+  const signals       = useAssetSignals(apiBase, assets, syncCounter);
 
   const [, tick] = useState(0);
   useEffect(() => { const id = setInterval(() => tick(n => n + 1), 30_000); return () => clearInterval(id); }, []);
@@ -256,9 +311,23 @@ export function Hero({
       <label className="sticky-field">
         <span className="sticky-label">Aktywo</span>
         <select className="sticky-select" value={selectedAsset} onChange={e => setSelectedAsset(e.target.value)}>
-          {assets.map(a => (
-            <option key={a.id} value={a.id}>{a.symbol} — {a.name}</option>
-          ))}
+          {(() => {
+            const foreign  = assets.filter(a => a.type === "stock" && a.currency !== "PLN");
+            const polish   = assets.filter(a => a.type === "stock" && a.currency === "PLN");
+            const commodities = assets.filter(a => a.type !== "stock");
+            const opt = (a: typeof assets[0]) => {
+              const sig = signals.get(a.id);
+              const dot = sig === "green" ? "🟢 " : sig === "red" ? "🔴 " : "";
+              return <option key={a.id} value={a.id}>{dot}{a.symbol} — {a.name}</option>;
+            };
+            return (
+              <>
+                {foreign.length > 0 && <optgroup label="── Spółki zagraniczne">{foreign.map(opt)}</optgroup>}
+                {polish.length > 0 && <optgroup label="── Spółki polskie (GPW)">{polish.map(opt)}</optgroup>}
+                {commodities.length > 0 && <optgroup label="── Surowce">{commodities.map(opt)}</optgroup>}
+              </>
+            );
+          })()}
         </select>
       </label>
 

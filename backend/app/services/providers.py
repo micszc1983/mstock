@@ -97,16 +97,19 @@ def fetch_search_news_from_finnhub(term: str, asset_id: str, asset_type: AssetTy
         pub_ts = article.get("datetime", 0)
         pub_dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc) if pub_ts else datetime.now(timezone.utc)
         identifier = article.get("id") or article.get("url") or f"{asset_id}-{pub_ts}"
+        title_raw = article.get("headline", "")
+        body_raw  = article.get("summary", "")
         items.append(NewsItem(
             id=f"finnhub-general-{asset_id}-{identifier}",
             asset_id=asset_id,
             source="finnhub:general",
-            title=article.get("headline", ""),
-            body=article.get("summary", ""),
+            title=title_raw,
+            body=body_raw,
             url=article.get("url", ""),
             published_at=pub_dt,
-            sentiment_score=0.0,
-            impact_score=0.5,
+            sentiment_score=infer_sentiment_from_text(title_raw, body_raw),
+            impact_score=infer_impact_from_text(title_raw, body_raw),
+            narratives=infer_narratives_from_text(title_raw, body_raw, asset_type),
         ))
     return items
 
@@ -272,6 +275,109 @@ def fetch_search_news_from_alpha_vantage(term: str, asset_id: str, asset_type: A
             )
         )
     return items
+
+def fetch_company_news_from_finnhub_range(
+    symbol: str, asset_id: str, asset_type: AssetType,
+    date_from: str, date_to: str,
+) -> List[NewsItem]:
+    """
+    Pobiera historyczne newsy z Finnhub dla konkretnego zakresu dat.
+    date_from / date_to: format 'YYYY-MM-DD'.
+    Finnhub darmowy plan pozwala pobierać do ~1 roku wstecz.
+    """
+    require_api_key(settings.finnhub_api_key, "FINNHUB_API_KEY")
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {"symbol": symbol, "from": date_from, "to": date_to, "token": settings.finnhub_api_key}
+    try:
+        with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    items: List[NewsItem] = []
+    for entry in payload[:200]:
+        title = entry.get("headline", "")
+        body  = entry.get("summary", "")
+        identifier = str(entry.get("id") or entry.get("datetime") or title[:50])
+        published_at = datetime.fromtimestamp(int(entry.get("datetime", 0)), tz=timezone.utc)
+        items.append(NewsItem(
+            id=f"finnhub-{asset_id}-{identifier}",
+            asset_id=asset_id,
+            published_at=published_at,
+            source=str(entry.get("source") or "Finnhub"),
+            title=title,
+            body=body,
+            sentiment_score=infer_sentiment_from_text(title, body),
+            impact_score=infer_impact_from_text(title, body),
+            narratives=infer_narratives_from_text(title, body, asset_type),
+        ))
+    return items
+
+
+def fetch_search_news_from_alpha_vantage_range(
+    term: str, asset_id: str, asset_type: AssetType,
+    time_from: str, time_to: str,
+) -> List[NewsItem]:
+    """
+    Pobiera historyczne newsy z Alpha Vantage NEWS_SENTIMENT dla konkretnego zakresu.
+    time_from / time_to: format 'YYYYMMDDTHHMM' (np. '20240101T0000').
+    Limit: 200 artykułów per call, 25 req/dzień na darmowym planie.
+    """
+    require_api_key(settings.alphavantage_api_key, "ALPHAVANTAGE_API_KEY")
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "NEWS_SENTIMENT",
+        "keywords": term,
+        "time_from": time_from,
+        "time_to": time_to,
+        "limit": 200,
+        "apikey": settings.alphavantage_api_key,
+    }
+    try:
+        with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return []
+
+    feed = payload.get("feed")
+    if not isinstance(feed, list):
+        return []
+
+    items: List[NewsItem] = []
+    for entry in feed:
+        try:
+            title = str(entry.get("title") or "")
+            body  = str(entry.get("summary") or "")
+            published_at = datetime.strptime(
+                str(entry.get("time_published")), "%Y%m%dT%H%M%S"
+            ).replace(tzinfo=timezone.utc)
+            overall_sentiment = entry.get("overall_sentiment_score")
+            sentiment_score = (
+                clamp(float(overall_sentiment), -1.0, 1.0)
+                if overall_sentiment is not None
+                else infer_sentiment_from_text(title, body)
+            )
+            items.append(NewsItem(
+                id=f"av-news-{asset_id}-{hash(str(entry.get('url', title)))}",
+                asset_id=asset_id,
+                published_at=published_at,
+                source=str(entry.get("source") or "AlphaVantage"),
+                title=title,
+                body=body,
+                sentiment_score=sentiment_score,
+                impact_score=infer_impact_from_text(title, body),
+                narratives=infer_narratives_from_text(title, body, asset_type),
+            ))
+        except Exception:
+            continue
+    return items
+
 
 # ══════════════════════════════════════════════════════════════════
 #  Alpaca Markets — ceny dzienne i newsy

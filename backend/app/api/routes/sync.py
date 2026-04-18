@@ -14,7 +14,7 @@ from app.services.scheduler import scheduler
 from app.services.feature_builder import rebuild_asset_features_and_forecasts
 from app.services.outcome_evaluator import evaluate_asset_outcomes
 from app.services.bootstrap import bootstrap_asset
-from app.services.sync import log_sync_error, log_sync_success, sync_news_for_asset, sync_prices_for_asset
+from app.services.sync import log_sync_error, log_sync_success, sync_news_for_asset, sync_prices_for_asset, backfill_news_for_asset
 
 router = APIRouter(tags=["sync"])
 
@@ -100,6 +100,42 @@ def sync_all(db: Session = Depends(get_db)) -> list[SyncResponse]:
         except HTTPException as exc:
             log_sync_error(db, asset.id, "news", str(exc.detail))
             results.append(SyncResponse(asset_id=asset.id, provider="news-sync", inserted=0, skipped=0, detail=f"Skipped news: {exc.detail}"))
+    return results
+
+
+@router.post("/sync/news-backfill/{asset_id}")
+def backfill_news(
+    asset_id: str,
+    months_back: int = Query(default=12, ge=1, le=24),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Pobiera historyczne newsy dla aktywa za ostatnie N miesięcy.
+    Używa Finnhub (US stocks) + Alpha Vantage (wszystkie).
+    Ostrożnie z limitami API — AV ma 25 req/dzień na free tier.
+    """
+    asset = get_asset(db, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
+    return backfill_news_for_asset(db, asset, months_back=months_back)
+
+
+@router.post("/sync/news-backfill-all")
+def backfill_news_all(
+    months_back: int = Query(default=6, ge=1, le=24),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """
+    Backfill historycznych newsów dla wszystkich aktywów.
+    Domyślnie 6 miesięcy żeby nie wyczerpać limitu AV w jednym wywołaniu.
+    """
+    results = []
+    for asset in list_assets(db):
+        try:
+            result = backfill_news_for_asset(db, asset, months_back=months_back)
+            results.append(result)
+        except Exception as exc:
+            results.append({"asset_id": asset.id, "error": str(exc)})
     return results
 
 
