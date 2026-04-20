@@ -363,6 +363,16 @@ class DecisionSnapshotORM(Base):
     relative_strength_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     company_risk_stack_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+class PortfolioPositionORM(Base):
+    __tablename__ = "portfolio_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), unique=True, index=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_buy_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+
+
 class EnsembleRecordORM(Base):
     __tablename__ = "ensemble_records"
 

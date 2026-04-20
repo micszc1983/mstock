@@ -100,6 +100,15 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
 
     db.commit()
     persist_thesis_snapshot(db, asset_row, snapshot_at)
+
+    # Aktualizuj predykcje ML po przebudowie features, żeby rekomendacje były spójne
+    try:
+        from app.services.ml_foundation import score_asset
+        for target in ("target_up_5d", "target_up_20d", "target_thesis_success"):
+            score_asset(db, asset.id, target)
+    except Exception as _exc:
+        pass  # brak modelu dla aktywa — nie przerywaj
+
     return snapshot
 
 

@@ -350,6 +350,52 @@ def run_periodic_sync() -> None:
 
 # ── Start / stop ─────────────────────────────────────────────────────────────
 
+def _send_daily_portfolio_report() -> None:
+    """Wysyła dzienny raport portfela emailem o 23:30."""
+    if not settings.smtp_host or not settings.smtp_username:
+        return
+    try:
+        from app.db.session import SessionLocal
+        from app.repositories.portfolio_positions import list_positions
+        from app.repositories.assets import get_asset
+        from app.services.portfolio_report import send_portfolio_report
+        import urllib.request, json as _json
+
+        db = SessionLocal()
+        try:
+            positions = list_positions(db)
+            if not positions:
+                print("[scheduler] portfolio-report: brak pozycji — pomijam")
+                return
+
+            recommendations: dict = {}
+            for pos in positions:
+                if pos.quantity <= 0:
+                    continue
+                try:
+                    url = f"http://localhost:8000/assets/{pos.asset_id}/recommendation"
+                    with urllib.request.urlopen(url, timeout=5) as r:
+                        d = _json.loads(r.read())
+                    asset = get_asset(db, pos.asset_id)
+                    recommendations[pos.asset_id] = {
+                        "recommendation":  d.get("recommendation"),
+                        "ml_prediction":   d.get("ml_prediction"),
+                        "forecast_dir_5d": d.get("forecast_dir_5d"),
+                        "forecast_dir_20d": d.get("forecast_dir_20d"),
+                        "last_price":      d.get("last_price"),
+                        "currency":        asset.currency if asset else "USD",
+                    }
+                except Exception as exc:
+                    print(f"[scheduler] portfolio-report: błąd rec dla {pos.asset_id}: {exc}")
+
+            result = send_portfolio_report(db, recommendations, to_email="dev@coad.pl")
+            print(f"[scheduler] portfolio-report: {result.get('detail')}")
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"[scheduler] portfolio-report: BŁĄD: {exc}")
+
+
 def start_scheduler() -> None:
     if not settings.auto_sync_enabled:
         print("[scheduler] Wyłączony (AUTO_SYNC_ENABLED=false)")
@@ -363,8 +409,17 @@ def start_scheduler() -> None:
         id="full-pipeline",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _send_daily_portfolio_report,
+        "cron",
+        hour=23,
+        minute=30,
+        timezone="Europe/Warsaw",
+        id="portfolio-report",
+        replace_existing=True,
+    )
     scheduler.start()
-    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min")
+    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, raport portfela o 23:30")
 
 
 def stop_scheduler() -> None:

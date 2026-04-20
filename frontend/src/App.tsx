@@ -63,6 +63,7 @@ import { KpiCard } from "./components/KpiCard";
 import { ColTip } from "./components/Tip";
 import { PageContainer, Section } from "./components/Layout";
 import { MetaRow, Panel, Pill } from "./components/Panel";
+import { Portfolio } from "./components/Portfolio";
 
 function humanizeError(message: string) {
   const lower = message.toLowerCase();
@@ -95,6 +96,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
+  const [activeTab, setActiveTab] = useState<"analysis" | "portfolio">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -747,6 +749,31 @@ export default function App() {
         setDisplayCurrency={setDisplayCurrency}
         usdPlnRate={usdPlnRate}
       />
+
+      {/* ── Zakładki ─────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
+        {([["analysis", "Analizy"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            style={{
+              padding: "6px 20px", border: "none", background: "none", cursor: "pointer",
+              fontSize: "0.88rem", fontWeight: activeTab === id ? 700 : 400,
+              color: activeTab === id ? "var(--accent)" : "var(--text-3)",
+              borderBottom: activeTab === id ? "2px solid var(--accent)" : "2px solid transparent",
+              marginBottom: -2, borderRadius: "4px 4px 0 0", transition: "color 0.15s",
+            }}
+          >{label}</button>
+        ))}
+      </div>
+
+      {/* ── Zakładka Portfel ─────────────────────────────────────────────── */}
+      {activeTab === "portfolio" && (
+        <Portfolio apiBase={apiBase} assets={assets} />
+      )}
+
+      {/* ── Zakładka Analizy (cała istniejąca treść) ─────────────────────── */}
+      {activeTab === "analysis" && <>
 
       {/* Rząd 1 — akcje ML */}
       {mlWorking && (
@@ -2515,6 +2542,8 @@ export default function App() {
       >
         <NarrativeHistoryChart rows={narrativeHistory} />
       </Section>
+
+      </> /* koniec zakładki Analizy */}
 
     </PageContainer>
   );}

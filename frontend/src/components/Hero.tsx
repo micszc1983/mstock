@@ -141,21 +141,23 @@ function useAssetSignals(apiBase: string, assets: Asset[], syncCounter?: number)
           const r = await fetch(`${apiBase}/assets/${a.id}/recommendation`);
           if (!r.ok) return [a.id, "neutral"] as const;
           const d = await r.json();
-          const rec   = d.recommendation as string | null;
-          const ml    = d.ml_prediction  as string | null;
-          const f5d   = d.forecast_dir_5d  as string | null;
-          const f20d  = d.forecast_dir_20d as string | null;
+          const rec   = d.recommendation      as string | null;
+          const ml5   = d.ml_prediction       as string | null;
+          const ml20  = d.ml_20d_prediction   as string | null;
+          const f5d   = d.forecast_dir_5d     as string | null;
+          const f20d  = d.forecast_dir_20d    as string | null;
           const allGreen =
-            rec   === "KUP"       &&
-            (ml === null || ml   === "up")   &&
-            (f5d === null || f5d  === "up")  &&
-            (f20d === null || f20d === "up") &&
-            ml !== null && f5d !== null && f20d !== null;
+            rec  === "KUP"  &&
+            ml5  === "up"   &&
+            (ml20 === null || ml20 === "up") &&
+            f5d  === "up"   &&
+            f20d === "up";
           const allRed =
-            rec   === "SPRZEDAJ"  &&
-            ml    === "down"      &&
-            f5d   === "down"      &&
-            f20d  === "down";
+            rec  === "SPRZEDAJ" &&
+            ml5  === "down"     &&
+            (ml20 === null || ml20 === "down") &&
+            f5d  === "down"     &&
+            f20d === "down";
           return [a.id, allGreen ? "green" : allRed ? "red" : "neutral"] as const;
         } catch {
           return [a.id, "neutral"] as const;

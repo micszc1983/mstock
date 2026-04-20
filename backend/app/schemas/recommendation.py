@@ -42,8 +42,10 @@ class AssetRecommendation(BaseModel):
     risk_score: Optional[float]
     action_label: Optional[str]       # z decision_support
 
-    ml_prediction: Optional[str]      # "up" | "down" | None
+    ml_prediction: Optional[str]      # "up" | "down" | None  (5d)
     ml_prob_up: Optional[float]
+    ml_20d_prediction: Optional[str] = None   # "up" | "down" | None  (20d)
+    ml_20d_prob_up: Optional[float] = None
     ml_thesis_prediction: Optional[str]   # target_thesis_success model
 
     directional_accuracy: Optional[float]   # historyczna jakość tez

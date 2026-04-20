@@ -75,6 +75,7 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
 
     # ── ML Predictions ─────────────────────────────────────────────────────
     ml_5d     = get_latest_prediction(db, asset_id, "target_up_5d")
+    ml_20d    = get_latest_prediction(db, asset_id, "target_up_20d")
     ml_thesis = get_latest_prediction(db, asset_id, "target_thesis_success")
 
     # ── Jakość historyczna ─────────────────────────────────────────────────
@@ -144,7 +145,12 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     # 10. ML predykcja 5d (jeśli dostępna)
     if ml_5d:
         add("ML: kierunek 5d", ml_5d.probability_up * 100,
-            _norm(ml_5d.probability_up, 0.5, 0.5), 0.09)
+            _norm(ml_5d.probability_up, 0.5, 0.5), 0.08)
+
+    # 10b. ML predykcja 20d (jeśli dostępna) — ważniejszy horyzont
+    if ml_20d:
+        add("ML: kierunek 20d", ml_20d.probability_up * 100,
+            _norm(ml_20d.probability_up, 0.5, 0.5), 0.10)
 
     # 11. ML: skuteczność tezy
     if ml_thesis:
@@ -177,6 +183,14 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         recommendation = "SPRZEDAJ"
     else:
         recommendation = "TRZYMAJ"
+
+    # ── Weto ML 20d: bardzo niskie p(up) blokuje KUP / wymusza SPRZEDAJ ──
+    if ml_20d:
+        p20 = ml_20d.probability_up
+        if p20 < 0.30 and recommendation == "KUP":
+            recommendation = "TRZYMAJ"   # nie kupuj gdy ML 20d mocno bearish
+        elif p20 < 0.20:
+            recommendation = "SPRZEDAJ"  # < 20% p(up) = silny sygnał sprzedaży
 
     confidence = abs(composite - 50.0) * 2  # 0-100
     if confidence >= 60:
@@ -248,6 +262,8 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         action_label=decision.action_label if decision else None,
         ml_prediction=ml_5d.predicted_label if ml_5d else None,
         ml_prob_up=round(ml_5d.probability_up * 100, 1) if ml_5d else None,
+        ml_20d_prediction=ml_20d.predicted_label if ml_20d else None,
+        ml_20d_prob_up=round(ml_20d.probability_up * 100, 1) if ml_20d else None,
         ml_thesis_prediction=ml_thesis.predicted_label if ml_thesis else None,
         directional_accuracy=round(dir_acc * 100, 1) if dir_acc else None,
         active_alerts=len(active),

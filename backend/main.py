@@ -55,6 +55,20 @@ async def lifespan(app: FastAPI):
             print("[startup] migracja: dodano kolumnę asset_id do ml_model_runs")
         except Exception:
             pass  # Kolumna już istnieje — ignoruj
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS portfolio_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL UNIQUE,
+                    quantity FLOAT NOT NULL DEFAULT 0.0,
+                    avg_buy_price FLOAT,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (asset_id) REFERENCES assets(id)
+                )
+            """))
+            print("[startup] migracja: tabela portfolio_positions gotowa")
+        except Exception:
+            pass
 
     print("[startup] tabele DB gotowe")
 
