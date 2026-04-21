@@ -33,6 +33,6 @@ mkdir -p "$ROOT_DIR/.run"
 
 echo "Backend PID: $(cat "$ROOT_DIR/.run/backend.pid")"
 echo "Frontend PID: $(cat "$ROOT_DIR/.run/frontend.pid")"
-echo "Backend:  http://127.0.0.1:8000  (LAN: http://192.168.0.161:8000)"
-echo "Frontend: http://127.0.0.1:5173  (LAN: http://192.168.0.161:5173)"
+echo "Backend:  http://127.0.0.1:8000  (LAN: http://192.168.0.168:8000)"
+echo "Frontend: http://127.0.0.1:5173  (LAN: http://192.168.0.168:5173)"
 echo "Logi: .run/backend.log i .run/frontend.log"

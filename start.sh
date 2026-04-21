@@ -19,16 +19,18 @@ fi
 
 cd "$BACKEND_DIR"
 
-if [ ! -d ".venv" ]; then
+if [ ! -d ".venv" ] || ! "$BACKEND_DIR/.venv/bin/python3" -m pip --version >/dev/null 2>&1; then
   echo "Tworzenie backend/.venv"
+  rm -rf .venv
   python3 -m venv .venv
 fi
 
-source .venv/bin/activate
-python -m pip install --upgrade pip >/dev/null
-pip install -r requirements.txt >/dev/null
+VENV_PYTHON="$BACKEND_DIR/.venv/bin/python3"
 
-DB_FILE=$(python - <<'PY'
+"$VENV_PYTHON" -m pip install --upgrade pip >/dev/null
+"$VENV_PYTHON" -m pip install -r requirements.txt >/dev/null
+
+DB_FILE=$("$VENV_PYTHON" - <<'PY'
 from pathlib import Path
 db_url = "sqlite:///./thesislab.db"
 env_path = Path(".env")
@@ -45,7 +47,7 @@ PY
 )
 
 if [ -n "$DB_FILE" ] && [ -f "$DB_FILE" ]; then
-  python - <<PY
+  "$VENV_PYTHON" - <<PY
 import sqlite3, sys
 db = r"$DB_FILE"
 conn = sqlite3.connect(db)
@@ -66,15 +68,15 @@ PY
   RC=$?
   if [ "$RC" = "10" ]; then
     echo "Stamping alembic -> 0005_nlp_and_alerts"
-    alembic stamp 0005_nlp_and_alerts
+    "$VENV_PYTHON" -m alembic stamp 0005_nlp_and_alerts
   elif [ "$RC" = "11" ]; then
     echo "Stamping alembic -> 0006_watchlists_reports_notifications"
-    alembic stamp 0006_watchlists_reports_notifications
+    "$VENV_PYTHON" -m alembic stamp 0006_watchlists_reports_notifications
   fi
 fi
 
 echo "Applying migrations..."
-alembic upgrade head
+"$VENV_PYTHON" -m alembic upgrade head
 
 if [ -f "$PROJECT_DIR/backend.pid" ] && kill -0 "$(cat "$PROJECT_DIR/backend.pid")" >/dev/null 2>&1; then
   echo "Backend already running"
@@ -99,8 +101,8 @@ fi
 
 echo ""
 echo "Gotowe."
-echo "Backend:  http://127.0.0.1:8000  (LAN: http://192.168.0.161:8000)"
-echo "Frontend: http://127.0.0.1:5173  (LAN: http://192.168.0.161:5173)"
+echo "Backend:  http://127.0.0.1:8000  (LAN: http://192.168.0.168:8000)"
+echo "Frontend: http://127.0.0.1:5173  (LAN: http://192.168.0.168:5173)"
 echo ""
 echo "Logi:"
 echo "  tail -f backend.log"

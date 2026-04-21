@@ -138,14 +138,21 @@ def compare_heuristic_vs_ml_for_asset(db: Session, asset_id: str):
     if feature is None or decision is None or not outcomes_list:
         raise ValueError("Not enough data to compare heuristic vs ML")
 
-    outcomes = {row.horizon: row for row in outcomes_list}
-    sample_size = len(outcomes_list)
+    # Filtruj historyczne wyniki dla horyzontu 5d
+    outcomes_5d = [o for o in outcomes_list if o.horizon == "5d"]
+    sample_size = len(outcomes_5d) if outcomes_5d else len(outcomes_list)
 
-    # Heurystyka: conviction > 0 i net_thesis_edge > 0 → bullish
-    heuristic_up    = 1 if (decision.net_thesis_edge > 0 and decision.conviction_score >= 50) else 0
-    actual_up_5d    = 1 if ("5d" in outcomes and outcomes["5d"].realized_return_pct > 0) else 0
-    heuristic_accuracy   = 1.0 if heuristic_up == actual_up_5d else 0.0
-    heuristic_avg_return = outcomes["5d"].realized_return_pct if ("5d" in outcomes and heuristic_up == 1) else 0.0
+    # Heurystyka: accuracy i avg_return liczone po całej historii outcomes
+    if outcomes_5d:
+        heuristic_accuracy = sum(1 for o in outcomes_5d if o.was_directionally_correct) / len(outcomes_5d)
+        heuristic_avg_return = sum(o.realized_return_pct for o in outcomes_5d) / len(outcomes_5d)
+    else:
+        heuristic_accuracy = 0.0
+        heuristic_avg_return = 0.0
+
+    # Potrzebne do wyboru better_mode i ML
+    outcomes = {row.horizon: row for row in outcomes_list}
+    actual_up_5d = 1 if ("5d" in outcomes and outcomes["5d"].realized_return_pct > 0) else 0
 
     # ML ensemble: zbierz per-asset + globalny, uśrednij
     ml_accuracy   = 0.0
@@ -161,30 +168,36 @@ def compare_heuristic_vs_ml_for_asset(db: Session, asset_id: str):
     if active_runs:
         try:
             import json as _json
-            # Użyj ostatnich training rowów jako feature vector (mają feature_json)
-            hist = list_training_rows_for_target(db, target_name, asset_id=asset_id, limit=26)
+            hist = list_training_rows_for_target(db, target_name, asset_id=asset_id, limit=100)
             if not hist:
-                hist = list_training_rows_for_target(db, target_name, asset_id=None, limit=26)
+                hist = list_training_rows_for_target(db, target_name, asset_id=None, limit=100)
             if not hist:
                 raise ValueError("brak danych treningowych dla feature vector")
 
-            X_full = [_json.loads(r.feature_json) for r in hist]
-
-            probs = []
-            for run in active_runs:
-                try:
-                    p = predict_proba_single(run.model_name, run.model_path, X_full)
-                    probs.append(p)
-                except Exception:
-                    pass
-
-            if probs:
-                prob = float(mean(probs))
-                ml_up = 1 if prob >= 0.5 else 0
-                ml_accuracy   = 1.0 if ml_up == actual_up_5d else 0.0
-                ml_avg_return = outcomes["5d"].realized_return_pct if ("5d" in outcomes and ml_up == 1) else 0.0
-                better_mode   = "ml" if (ml_accuracy > heuristic_accuracy or
-                                         (ml_accuracy == heuristic_accuracy and ml_avg_return > heuristic_avg_return)) else "heuristic"
+            # Filtruj wiersze z etykietą i zwrotem
+            labeled = [r for r in hist if r.target_up_5d is not None and r.target_return_5d is not None]
+            if labeled:
+                correct_ml = 0
+                returns_ml = []
+                for row in labeled:
+                    X_row = [_json.loads(row.feature_json)]
+                    row_probs = []
+                    for run in active_runs:
+                        try:
+                            p = predict_proba_single(run.model_name, run.model_path, X_row)
+                            row_probs.append(p)
+                        except Exception:
+                            pass
+                    if row_probs:
+                        row_prob = float(mean(row_probs))
+                        if (row_prob >= 0.5) == bool(row.target_up_5d):
+                            correct_ml += 1
+                        returns_ml.append(row.target_return_5d)
+                if returns_ml:
+                    ml_accuracy = correct_ml / len(returns_ml)
+                    ml_avg_return = sum(returns_ml) / len(returns_ml)
+                    better_mode = "ml" if (ml_accuracy > heuristic_accuracy or
+                                           (ml_accuracy == heuristic_accuracy and ml_avg_return > heuristic_avg_return)) else "heuristic"
         except Exception:
             pass
 

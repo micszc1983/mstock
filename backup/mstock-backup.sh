@@ -13,7 +13,7 @@ NAS_HOST="192.168.0.200"
 NAS_BASE="/share/Pliki_ms/dev_backup/mstock"
 KEY_FILE="$HOME/.ssh/nas_mstock"
 
-BACKEND_DIR="/run/media/tt38dn/dane2/Gielda-fixed/backend"
+BACKEND_DIR="/home/tt38dn/MStock/backend"
 DB_FILE="$BACKEND_DIR/thesislab.db"
 MODELS_DIR="$BACKEND_DIR/ml_models"
 
