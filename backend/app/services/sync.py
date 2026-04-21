@@ -11,8 +11,9 @@ from app.repositories.sync_logs import add_sync_log
 from app.schemas.common import AssetType
 from app.schemas.sync import SyncResponse
 from app.services.providers import (
-    fetch_news_from_alpaca,
-    fetch_stock_prices_from_alpaca,
+    fetch_gpw_news_from_rss,
+    fetch_commodity_news_from_rss,
+    fetch_news_from_newsapi,
     fetch_stock_prices_from_massive,
     fetch_stock_prices_from_rapidapi,
     fetch_gpw_prices_from_rapidapi,
@@ -29,26 +30,6 @@ from app.services.providers import (
 
 
 
-def _purge_pre_alpaca_prices(db: Session, asset_id: str, alpaca_points: list) -> None:
-    """
-    Usuwa stare ceny (seed/fake) które są starsze niż najwcześniejsza data z Alpaca.
-    Alpaca ma 7 lat historii — seed data jest zbędna i zakłóca wykresy.
-    """
-    if not alpaca_points:
-        return
-    from sqlalchemy import delete
-    from app.db.models import PricePointORM
-    from app.utils.datetime import ensure_utc
-
-    earliest = min(ensure_utc(p.timestamp) for p in alpaca_points)
-    deleted = db.execute(
-        delete(PricePointORM).where(
-            PricePointORM.asset_id == asset_id,
-            PricePointORM.timestamp < earliest,
-        )
-    ).rowcount
-    if deleted:
-        print(f"[sync] {asset_id}: usunięto {deleted} seed prices sprzed {earliest.date()}")
 
 def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
     # Czytaj config z kolumn w AssetORM (nowe podejście — konfiguracja w DB)
@@ -115,7 +96,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     log_sync_error(db, asset.id, "prices_av_fallback", str(av_err))
                     points = []
 
-        # ── US stocks: Massive → Twelvedata → Alpaca → RapidAPI → AV → Finnhub ─
+        # ── US stocks: Massive → Twelvedata → RapidAPI → AV → Finnhub ─
         else:
             # 1. Massive.com — priorytet: 2 lata historii, brak limitu dziennego
             if settings.massive_api_key:
@@ -141,19 +122,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     log_sync_error(db, asset.id, "prices_twelvedata_fallback", str(td_err))
                     points = []
 
-            # 3. Alpaca — 100 dni historii
-            if not points and settings.alpaca_api_key and settings.alpaca_api_secret:
-                try:
-                    provider = "alpaca:bars"
-                    points = fetch_stock_prices_from_alpaca(asset.symbol or symbol)
-                    if not points:
-                        raise ValueError("Alpaca zwróciło 0 punktów")
-                    _purge_pre_alpaca_prices(db, asset.id, points)
-                except Exception as alpaca_err:
-                    log_sync_error(db, asset.id, "prices_alpaca_fallback", str(alpaca_err))
-                    points = []
-
-            # 4. RapidAPI Yahoo Finance — obsługuje US stocks też
+            # 3. RapidAPI Yahoo Finance — obsługuje US stocks też
             if not points and settings.rapidapi_api_key:
                 try:
                     provider = "rapidapi:yahoo-finance"
@@ -192,11 +161,30 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                 detail=f"Brak danych cenowych dla {asset.id}: żaden provider nie zwrócił danych. Sprawdź klucze API."
             )
     else:
-        metal_fn = asset.metal_price_fn or legacy.get("metal_price_fn")
-        if not metal_fn:
-            raise HTTPException(status_code=400, detail=f"No metal price function configured for {asset.id}. Set metal_price_fn in asset config.")
-        provider = f"alphavantage:{metal_fn}"
-        points = fetch_metal_prices_from_alpha_vantage(metal_fn)
+        # Metale: jeśli ma price_symbol → Yahoo Finance (futures GC=F, SI=F itp.) — pełne OHLCV, bez limitu
+        price_sym = asset.price_symbol or legacy.get("price_symbol")
+        metal_fn  = asset.metal_price_fn or legacy.get("metal_price_fn")
+
+        if price_sym:
+            # Yahoo Finance — ten sam provider co GPW, działa dla futures i spot
+            try:
+                provider = "yahoo:v8"
+                points = fetch_gpw_prices_from_stooq(price_sym)
+                if not points:
+                    raise ValueError("Yahoo Finance zwróciło 0 punktów")
+                print(f"[sync] {asset.id}: Yahoo Finance OK — {len(points)} punktów")
+            except Exception as yahoo_err:
+                log_sync_error(db, asset.id, "prices_yahoo_fallback", str(yahoo_err))
+                points = []
+            # Fallback: Alpha Vantage jeśli jest metal_fn
+            if not points and metal_fn:
+                provider = f"alphavantage:{metal_fn}"
+                points = fetch_metal_prices_from_alpha_vantage(metal_fn)
+        elif metal_fn:
+            provider = f"alphavantage:{metal_fn}"
+            points = fetch_metal_prices_from_alpha_vantage(metal_fn)
+        else:
+            raise HTTPException(status_code=400, detail=f"No price_symbol or metal_price_fn configured for {asset.id}.")
 
     for point in points:
         if upsert_price_point(db, asset.id, point):
@@ -216,30 +204,56 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
     news_sym = asset.news_symbol or legacy.get("news_symbol")
     term = asset.news_term or legacy.get("news_term") or asset.name
 
-    if asset.type == AssetType.STOCK.value and news_sym and settings.alpaca_api_key:
-        # US stocks — Alpaca news priorytet (50 artykułów / call, brak limitu dziennego)
-        provider = "alpaca:news"
-        items = fetch_news_from_alpaca(news_sym or asset.symbol, asset.id, asset_type)
-        if not items and settings.finnhub_api_key:
-            provider = "finnhub:company-news"
-            items = fetch_company_news_from_finnhub(news_sym, asset.id, asset_type)
-    elif asset.type == AssetType.STOCK.value and news_sym and settings.finnhub_api_key:
+    if asset.type == AssetType.STOCK.value and news_sym and settings.finnhub_api_key:
+        # US stocks z news_symbol — Finnhub company-news (najlepsze źródło dla US)
         provider = "finnhub:company-news"
         items = fetch_company_news_from_finnhub(news_sym, asset.id, asset_type)
+
     elif asset.type == AssetType.STOCK.value and not news_sym:
-        # Spółki spoza US (GPW): Finnhub general search → fallback Alpha Vantage
-        if settings.finnhub_api_key:
+        # GPW i inne spółki bez news_symbol
+        # 1. RSS (Bankier, StockWatch, PB) — bez limitu, po polsku
+        provider = "rss:gpw"
+        items = fetch_gpw_news_from_rss(term, asset.id, asset_type)
+        # 2. NewsAPI — bardziej globalne newsy (EN), 100 req/dzień
+        if settings.newsapi_api_key:
+            newsapi_items = fetch_news_from_newsapi(term, asset.id, asset_type)
+            existing_ids = {i.id for i in items}
+            items += [i for i in newsapi_items if i.id not in existing_ids]
+            if newsapi_items:
+                provider = "rss:gpw+newsapi"
+        # 3. Finnhub general search — fallback (słabe dla GPW, ale coś)
+        if not items and settings.finnhub_api_key:
             provider = "finnhub:general-search"
             from app.services.providers import fetch_search_news_from_finnhub
             items = fetch_search_news_from_finnhub(term, asset.id, asset_type)
-        else:
-            items = []
+        # 4. Alpha Vantage — ostatni fallback
         if not items:
             provider = "alphavantage:NEWS_SENTIMENT"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
+
+    elif asset.type == AssetType.METAL.value:
+        # Surowce — RSS Kitco/Reuters + NewsAPI
+        provider = "rss:commodity"
+        items = fetch_commodity_news_from_rss(term, asset.id, asset_type)
+        if settings.newsapi_api_key:
+            newsapi_items = fetch_news_from_newsapi(f"{term} price", asset.id, asset_type)
+            existing_ids = {i.id for i in items}
+            items += [i for i in newsapi_items if i.id not in existing_ids]
+            if newsapi_items:
+                provider = "rss:commodity+newsapi"
+        if not items:
+            provider = "alphavantage:NEWS_SENTIMENT"
+            items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
+
     else:
-        provider = "alphavantage:NEWS_SENTIMENT"
-        items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
+        # US stocks bez news_sym, inne typy — NewsAPI → Alpha Vantage
+        items = []
+        if settings.newsapi_api_key:
+            provider = "newsapi"
+            items = fetch_news_from_newsapi(term, asset.id, asset_type)
+        if not items:
+            provider = "alphavantage:NEWS_SENTIMENT"
+            items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
     for item in items:
         if upsert_news_item(db, item):

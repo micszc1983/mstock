@@ -21,11 +21,13 @@ def enrich_asset_news(asset_id: str, limit: int = Query(default=50, ge=1, le=500
 
 
 @router.post("/news/enrich/all")
-def enrich_all_news(limit_per_asset: int = Query(default=50, ge=1, le=500), db: Session = Depends(get_db)) -> dict:
-    total = 0
+def enrich_all_news(limit_per_asset: int = Query(default=200, ge=1, le=2000), db: Session = Depends(get_db)) -> dict:
+    results = {}
     for asset in list_assets(db):
-        total += enrich_news_for_asset(db, asset.id, limit=limit_per_asset)
-    return {"enriched": total}
+        n = enrich_news_for_asset(db, asset.id, limit=limit_per_asset)
+        if n > 0:
+            results[asset.id] = n
+    return {"enriched": sum(results.values()), "per_asset": results}
 
 
 @router.get("/news/{news_id}/nlp", response_model=NewsNLPResponse)

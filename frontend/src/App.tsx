@@ -4,7 +4,6 @@ import {
   Brain,
   Gauge,
   ShieldAlert,
-  FileText,
   Mail,
   MessageCircle,
   Rows3,
@@ -27,7 +26,6 @@ import type {
   Asset,
   DataQualityReport,
   AssetCreate,
-  CompareAssetRow,
   Forecast,
   ForecastQualitySummary,
   MLDatasetStats,
@@ -40,7 +38,6 @@ import type {
   NarrativePoint,
   NotificationChannel,
   NotificationEvent,
-  ReportResponse,
   StoredThesis,
   StrategyComparison,
   ThesisOutcome,
@@ -96,7 +93,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "portfolio">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -121,12 +118,8 @@ export default function App() {
   const [narrativeHistory, setNarrativeHistory] = useState<NarrativePoint[]>([]);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
-  const [compareRows, setCompareRows] = useState<CompareAssetRow[]>([]);
-  const [compareAssetIds, setCompareAssetIds] = useState<string[]>([]);
-  const [aggregateRows, setAggregateRows] = useState<any[]>([]);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [events, setEvents] = useState<NotificationEvent[]>([]);
-  const [lastReport, setLastReport] = useState<ReportResponse | null>(null);
 
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null);
   const [mlPrediction, setMlPrediction] = useState<MLPrediction | null>(null);
@@ -140,6 +133,8 @@ export default function App() {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [recommendations, setRecommendations] = useState<AssetRecommendation[]>([]);
   const [dataQuality, setDataQuality] = useState<DataQualityReport | null>(null);
+  const [enrichingAsset, setEnrichingAsset] = useState<string | null>(null);
+  const [enrichAllBusy, setEnrichAllBusy] = useState(false);
   const [priceHistory, setPriceHistory] = useState<PriceBar[]>([]);
   const [ensembleSignal, setEnsembleSignal] = useState<EnsembleSignal | null>(null);
   const [ensembleLeaderboard, setEnsembleLeaderboard] = useState<EnsembleLeaderboard[]>([]);
@@ -223,10 +218,7 @@ export default function App() {
     setInfo("");
 
     try {
-      const selectedIds = compareAssetIds.length > 0
-        ? Array.from(new Set([...compareAssetIds, selectedAsset]))
-        : Array.from(new Set([selectedAsset, "aapl", "gold", "nvda", "silver"]));
-
+      // ── Faza 1: dane krytyczne — renderuje UI jak najszybciej ──────────────
       const [
         thesis,
         forecasts,
@@ -238,25 +230,13 @@ export default function App() {
         narratives,
         assetAlerts,
         wl,
-        aggregate,
-        compare,
-        notificationChannels,
-        notificationEvents,
         currentMlStatus,
         currentMlPrediction,
         currentMlExplanation,
-        currentMlModels,
-        currentMlBacktests,
-        currentMlDatasetStats,
-        currentMlComparison,
-        currentAvailableModels,
-        currentStrategyComparison,
-        currentAllComparisons,
         currentRecommendations,
-        currentDataQuality,
         currentPriceHistory,
         currentEnsembleSignal,
-        currentEnsembleLeaderboard,
+        notificationChannels,
       ] = await Promise.all([
         api.latestThesis(selectedAsset).catch(() => null),
         api.latestForecasts(selectedAsset).catch(() => []),
@@ -268,34 +248,13 @@ export default function App() {
         api.narrativeHistory(selectedAsset, 14).catch(() => []),
         api.assetAlerts(selectedAsset).catch(() => []),
         api.watchlists().catch(() => []),
-        api.aggregateDashboard(selectedIds).catch(() => ({
-          asset_ids: selectedIds,
-          rows: [],
-        })),
-        api.compareAssets(selectedIds).catch(() => ({
-          asset_ids: selectedIds,
-          rows: [],
-        })),
-        api.notificationChannels().catch(() => []),
-        api.notificationEvents().catch(() => []),
         api.mlStatus().catch(() => null),
         api.latestMlPrediction(selectedAsset, mlActiveTarget).catch(() => null),
         api.mlExplain(selectedAsset, mlActiveTarget).catch(() => null),
-        api.mlModels().catch(() => []),
-        api.mlBacktests().catch(() => []),
-        api.mlDatasetStats().catch(() => null),
-        Promise.all([
-          api.mlComparison("target_up_5d").catch(() => []),
-          api.mlComparison("target_up_20d").catch(() => []),
-        ]).then(([a, b]) => [...a, ...b]),
-        api.mlAvailableModels().catch(() => ({ available: [] })),
-        api.latestHeuristicVsMl(selectedAsset).catch(() => null),
-        api.allHeuristicVsMl().catch(() => []),
         api.recommendations().catch(() => []),
-        api.dataQuality().catch(() => null),
-        api.priceHistory(selectedAsset, 5000).catch(() => []),
+        api.priceHistory(selectedAsset, 365).catch(() => []),
         api.ensembleSignal(selectedAsset, ensembleMode).catch(() => null),
-        api.ensembleLeaderboard().catch(() => []),
+        api.notificationChannels().catch(() => []),
       ]);
 
       setLatestThesis(thesis);
@@ -308,13 +267,45 @@ export default function App() {
       setNarrativeHistory(narratives);
       setAlerts(assetAlerts);
       setWatchlists(wl);
-      setAggregateRows(aggregate.rows ?? []);
-      setCompareRows(compare.rows ?? []);
-      setChannels(notificationChannels);
-      setEvents(notificationEvents);
-
       setMlStatus(currentMlStatus);
       setMlPrediction(currentMlPrediction);
+      setMlExplanation(currentMlExplanation);
+      setRecommendations(currentRecommendations);
+      setPriceHistory(currentPriceHistory);
+      setEnsembleSignal(currentEnsembleSignal);
+      setChannels(notificationChannels);
+      setLastRefreshedAt(new Date());
+      setLoading(false);  // odblokuj UI — faza 2 idzie w tle
+
+      // ── Faza 2: dane pomocnicze — ładuje się po wyrenderowaniu UI ──────────
+      const [
+        notificationEvents,
+        currentMlModels,
+        currentMlBacktests,
+        currentMlDatasetStats,
+        currentMlComparison,
+        currentAvailableModels,
+        currentStrategyComparison,
+        currentAllComparisons,
+        currentDataQuality,
+        currentEnsembleLeaderboard,
+      ] = await Promise.all([
+        api.notificationEvents().catch(() => []),
+        api.mlModels().catch(() => []),
+        api.mlBacktests().catch(() => []),
+        api.mlDatasetStats().catch(() => null),
+        Promise.all([
+          api.mlComparison("target_up_5d").catch(() => []),
+          api.mlComparison("target_up_20d").catch(() => []),
+        ]).then(([a, b]) => [...a, ...b]),
+        api.mlAvailableModels().catch(() => ({ available: [] })),
+        api.latestHeuristicVsMl(selectedAsset).catch(() => null),
+        api.allHeuristicVsMl().catch(() => []),
+        api.dataQuality().catch(() => null),
+        api.ensembleLeaderboard().catch(() => []),
+      ]);
+
+      setEvents(notificationEvents);
       setMlModelsState(currentMlModels);
       setMlBacktestsState(currentMlBacktests);
       setMlDatasetStats(currentMlDatasetStats);
@@ -322,16 +313,10 @@ export default function App() {
       setAvailableModels(currentAvailableModels?.available ?? []);
       setStrategyComparison(currentStrategyComparison);
       setAllComparisons(currentAllComparisons);
-      setLastRefreshedAt(new Date());
-      setRecommendations(currentRecommendations);
       setDataQuality(currentDataQuality);
-      setPriceHistory(currentPriceHistory);
-      setEnsembleSignal(currentEnsembleSignal);
       setEnsembleLeaderboard(currentEnsembleLeaderboard);
-      setMlExplanation(currentMlExplanation);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
-    } finally {
       setLoading(false);
     }
   }
@@ -503,17 +488,7 @@ export default function App() {
     }
   }
 
-  async function createReport() {
-    try {
-      const report = await api.createAssetReport(selectedAsset);
-      setLastReport(report);
-      setInfo(`Wygenerowano raport PDF: ${report.file_name}`);
-    } catch (err) {
-      setError(humanizeError(err instanceof Error ? err.message : String(err)));
-    }
-  }
-
-  async function notifyFirstEmail() {
+async function notifyFirstEmail() {
     try {
       const emailChannel = channels.find((x) => x.channel_type === "email");
       if (!emailChannel) {
@@ -731,7 +706,6 @@ export default function App() {
     <PageContainer>
       <Hero
         apiBase={apiBase}
-        setApiBase={updateApiBase}
         assets={assets}
         selectedAsset={selectedAsset}
         setSelectedAsset={setSelectedAsset}
@@ -748,11 +722,12 @@ export default function App() {
         displayCurrency={displayCurrency}
         setDisplayCurrency={setDisplayCurrency}
         usdPlnRate={usdPlnRate}
+        recommendations={recommendations}
       />
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -766,6 +741,97 @@ export default function App() {
           >{label}</button>
         ))}
       </div>
+
+      {/* ── Zakładka Tezy ────────────────────────────────────────────────── */}
+      {activeTab === "theses" && <>
+      <Section
+        title="Bieżąca teza"
+        subtitle="Aktualna teza inwestycyjna, kontrteza i warunki unieważnienia."
+      >
+        <div className="grid-2">
+          <Panel title="Teza">
+            <div className="pill-row">
+              <Pill tone="good">{titleize(latestThesis?.dominant_narrative)}</Pill>
+              <Pill>{titleize(latestThesis?.regime)}</Pill>
+            </div>
+            <p className="long-text">{latestThesis?.thesis ?? "Brak danych."}</p>
+          </Panel>
+          <Panel title="Kontrteza">
+            <p className="long-text">{latestThesis?.anti_thesis ?? "Brak danych."}</p>
+            <MetaRow label="Model" value={latestThesis?.model_name ?? "—"} />
+          </Panel>
+        </div>
+      </Section>
+
+      <Section
+        title="Prognoza 1d / 5d / 20d"
+        subtitle="Bieżące prognozy i historia poprzednich prognoz."
+      >
+        <div className="grid-3">
+          {latestForecasts.map((forecast) => (
+            <Panel key={`${forecast.horizon}-${forecast.generated_at}`} title={forecast.horizon}>
+              <div className="pill-row">
+                <Pill tone={forecast.direction === "up" ? "good" : forecast.direction === "down" ? "bad" : "warn"}>
+                  {forecast.direction}
+                </Pill>
+                <Pill>{titleize(forecast.regime_label)}</Pill>
+              </div>
+              <MetaRow label="Prawdopod. wzrostu" value={formatPct(forecast.up_probability)} />
+              <MetaRow label="Prawdopod. spadku"  value={formatPct(forecast.down_probability)} />
+              <MetaRow label="Pewność"             value={formatPct(forecast.confidence)} />
+            </Panel>
+          ))}
+        </div>
+        <div className="spacer" />
+        <ForecastHistoryChart rows={forecastHistory} />
+      </Section>
+
+      <Section
+        title="Wyniki tez"
+        subtitle="Porównanie tez z faktycznym zachowaniem ceny."
+      >
+        <div className="grid-2">
+          <OutcomesChart rows={thesisOutcomes} />
+          <Panel title="Podsumowanie wyników">
+            <MetaRow label="Łączna liczba wyników" value={String(thesisQualitySummary?.total_outcomes ?? 0)} />
+            <MetaRow
+              label="Śr. zrealizowany zwrot"
+              value={thesisQualitySummary ? formatPct(thesisQualitySummary.average_realized_return_pct, 3) : "—"}
+            />
+          </Panel>
+        </div>
+        <div className="spacer" />
+        <DataTable
+          columns={["Horyzont","Cena bazowa","Cena zrealizowana","Zwrot %","Trafny kierunek","Wynik"]}
+          rows={thesisOutcomes.slice(0, 12).map((r) => ({
+            "Horyzont": r.horizon,
+            "Cena bazowa": r.base_price?.toFixed(2) ?? "—",
+            "Cena zrealizowana": r.realized_price?.toFixed(2) ?? "—",
+            "Zwrot %": formatPct(r.realized_return_pct),
+            "Trafny kierunek": r.was_directionally_correct ? "✓" : "✗",
+            "Wynik": r.outcome_label,
+          }))}
+        />
+      </Section>
+
+      <Section
+        title="Podsumowanie jakości"
+        subtitle="Metryki jakości tez i prognoz na przestrzeni czasu."
+      >
+        <div className="grid-2">
+          <ThesisQualityChart rows={thesisQualityByHorizon} />
+          <Panel title="Jakość prognoz">
+            {forecastQualitySummary.map((item) => (
+              <div key={item.horizon} className="quality-block">
+                <strong>{item.horizon}</strong>
+                <MetaRow label="Śr. prawdopod. wzrostu" value={formatPct(item.average_up_probability)} />
+                <MetaRow label="Śr. pewność"             value={formatPct(item.average_confidence)} />
+              </div>
+            ))}
+          </Panel>
+        </div>
+      </Section>
+      </> /* koniec zakładki Tezy */}
 
       {/* ── Zakładka Portfel ─────────────────────────────────────────────── */}
       {activeTab === "portfolio" && (
@@ -824,10 +890,6 @@ export default function App() {
 
       {/* Rząd 2 — pozostałe akcje */}
       <div className="toolbar-row" style={{ marginTop: "0.4rem" }}>
-        <button className="secondary-button" onClick={createReport}>
-          <FileText size={16} />
-          Eksport PDF
-        </button>
         <button className="secondary-button" onClick={addSelectedToFirstWatchlist}>
           <Star size={16} />
           Dodaj do watchlisty
@@ -1480,6 +1542,10 @@ export default function App() {
         )}
       </Section>
 
+      </> /* koniec zakładki Analizy */}
+
+      {/* ── Zakładka Rekomendacje ───────────────────────────────────────────── */}
+      {activeTab === "recommendations" && <>
       <Section
         title="Tabela rekomendacji"
         subtitle="Syntetyczna rekomendacja KUP / SPRZEDAJ / TRZYMAJ dla każdego aktywa na podstawie wszystkich dostępnych sygnałów."
@@ -1649,6 +1715,10 @@ export default function App() {
         )}
       </Section>
 
+      </> /* koniec zakładki Rekomendacje */}
+
+      {/* ── Zakładka Jakość danych ──────────────────────────────────────────── */}
+      {activeTab === "quality" && <>
       <Section
         title="Jakość danych"
         subtitle="Monitoring brakujących danych, stale'ów, błędów providerów i coverage ML per aktywo."
@@ -1694,6 +1764,28 @@ export default function App() {
             })()}
 
             {/* ── Per-asset table ── */}
+            <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:"0.4rem" }}>
+              <button
+                onClick={async () => {
+                  setEnrichAllBusy(true);
+                  try {
+                    const r = await api.enrichAllNews();
+                    const total = r.enriched;
+                    alert(`NLP enrichment zakończony: +${total} newsów`);
+                    const dq = await api.dataQuality().catch(() => null);
+                    if (dq) setDataQuality(dq);
+                  } catch (err) {
+                    alert(`Błąd: ${err instanceof Error ? err.message : err}`);
+                  } finally {
+                    setEnrichAllBusy(false);
+                  }
+                }}
+                disabled={enrichAllBusy}
+                style={{ fontSize:"0.75rem", padding:"0.25rem 0.75rem", background:"#1e3a5f", color:"#fff", border:"none", borderRadius:"4px", cursor:"pointer", opacity: enrichAllBusy ? 0.6 : 1 }}
+              >
+                {enrichAllBusy ? "Trwa NLP…" : "Uruchom NLP dla wszystkich"}
+              </button>
+            </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.79rem" }}>
                 <thead>
@@ -1767,6 +1859,28 @@ export default function App() {
                           <span style={{ color: a.news.nlp_coverage_pct>=70?"#16a34a":a.news.nlp_coverage_pct>=30?"#b45309":"#dc2626" }}>
                             {a.news.nlp_coverage_pct.toFixed(0)}%
                           </span>
+                          {a.news.nlp_coverage_pct < 30 && a.news.total_items > 0 && (
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setEnrichingAsset(a.asset_id);
+                                try {
+                                  const r = await api.enrichNews(a.asset_id);
+                                  alert(`NLP enrichment: +${r.enriched} newsów`);
+                                  const dq = await api.dataQuality().catch(() => null);
+                                  if (dq) setDataQuality(dq);
+                                } catch (err) {
+                                  alert(`Błąd: ${err instanceof Error ? err.message : err}`);
+                                } finally {
+                                  setEnrichingAsset(null);
+                                }
+                              }}
+                              disabled={enrichingAsset === a.asset_id}
+                              style={{ display:"block", marginTop:"0.2rem", fontSize:"0.6rem", padding:"1px 5px", background:"#1e3a5f", color:"#fff", border:"none", borderRadius:"3px", cursor:"pointer", opacity: enrichingAsset === a.asset_id ? 0.6 : 1 }}
+                            >
+                              {enrichingAsset === a.asset_id ? "…" : "NLP"}
+                            </button>
+                          )}
                         </td>
                         <td style={{ padding:"0.35rem 0.5rem" }}>
                           {a.features.has_snapshot
@@ -1806,7 +1920,10 @@ export default function App() {
           </>
         )}
       </Section>
+      </> /* koniec zakładki Jakość danych */}
 
+      {/* ── Sekcje dodatkowe w zakładce Analizy (heurystyka vs ML, itd.) ───── */}
+      {activeTab === "analysis" && <>
       <Section
         title="Skuteczność: heurystyka vs ML"
         subtitle="Porównanie trafności heurystyki i modelu ML."
@@ -1947,7 +2064,7 @@ export default function App() {
         <div className="grid-2">
           {/* ── Lista aktywów z opcją usunięcia ── */}
           <Panel title="Aktywne aktywa">
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", marginBottom: "0.75rem" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", marginBottom: "0.75rem", maxHeight: "calc(6 * 4.2rem)", overflowY: "auto" }}>
               {assets.map((a) => (
                 <div key={a.id} style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -2191,177 +2308,6 @@ export default function App() {
       </Section>
 
       <Section
-        title="Dashboard zbiorczy dla wielu aktywów"
-        subtitle="Przegląd kilku aktywów naraz."
-      >
-        <DataTable
-          columns={[
-            "asset",
-            "last_price",
-            "trend_score",
-            "sentiment_score",
-            "fragility_score",
-            "regime",
-            "dominant_narrative",
-          ]}
-          rows={aggregateRows.map((row: any) => ({
-            asset: row.asset?.symbol || row.asset?.id || "",
-            last_price: fmtPrice(row.last_price, assetCurrencyMap.get(row.asset?.id) ?? "USD"),
-            trend_score: row.trend_score,
-            sentiment_score: row.sentiment_score,
-            fragility_score: row.fragility_score,
-            regime: row.regime,
-            dominant_narrative: row.dominant_narrative,
-          }))}
-        />
-      </Section>
-
-      <Section
-        title="Porównywarka aktywów"
-        subtitle="Porównanie metryk między aktywami."
-      >
-        <div className="grid-2">
-          <Panel title="Wybór aktywów do porównania">
-            <p className="long-text" style={{ marginBottom: "0.75rem" }}>
-              Zaznacz aktywa które chcesz porównać, następnie kliknij
-              &ldquo;Odśwież&rdquo;.
-            </p>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-              {assets.map((a) => {
-                const checked = compareAssetIds.includes(a.id);
-                return (
-                  <label
-                    key={a.id}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "0.35rem",
-                      padding: "0.3rem 0.65rem",
-                      borderRadius: "6px",
-                      border: checked ? "1.5px solid var(--accent)" : "1px solid var(--border)",
-                      background: checked ? "var(--bg-hover)" : "var(--bg-card)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      fontSize: "0.85rem",
-                      fontWeight: checked ? 500 : 400,
-                      userSelect: "none",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) =>
-                        setCompareAssetIds((prev) =>
-                          e.target.checked
-                            ? [...prev, a.id]
-                            : prev.filter((id) => id !== a.id)
-                        )
-                      }
-                      style={{ margin: 0 }}
-                    />
-                    {a.name}
-                  </label>
-                );
-              })}
-            </div>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <button
-                className="secondary-button"
-                onClick={() => setCompareAssetIds(assets.map((a) => a.id))}
-              >
-                Zaznacz wszystkie
-              </button>
-              <button
-                className="secondary-button"
-                onClick={() => setCompareAssetIds([])}
-              >
-                Wyczyść
-              </button>
-            </div>
-          </Panel>
-
-          <Panel title="Wyniki porównania">
-            {compareRows.length === 0 ? (
-              <p className="long-text">
-                Zaznacz aktywa i kliknij &ldquo;Odśwież&rdquo;.
-              </p>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                      {["Aktywo","Cena","Trend","Sent.","Diverg.","Krhkość","Reżim","Narr.","Dir 1d","Conf 1d"].map((h) => (
-                        <th key={h} style={{ padding: "0.35rem 0.5rem", textAlign: "left", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {compareRows.map((row) => {
-                      const score = (v: number | null | undefined) =>
-                        v == null ? "—" : v.toFixed(1);
-                      const pct = (v: number | null | undefined) =>
-                        v == null ? "—" : (v * 100).toFixed(0) + "%";
-                      const dirColor = row.forecast_direction_1d === "up"
-                        ? "#16a34a" : row.forecast_direction_1d === "down" ? "#dc2626" : "inherit";
-                      return (
-                        <tr
-                          key={row.asset_id}
-                          style={{ borderBottom: "1px solid var(--border)", background: row.asset_id === selectedAsset ? "var(--bg-hover)" : undefined }}
-                        >
-                          <td style={{ padding: "0.35rem 0.5rem", fontWeight: 500 }}>{row.asset_id.toUpperCase()}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{fmtPrice(row.last_price, assetCurrencyMap.get(row.asset_id) ?? "USD")}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{score(row.trend_score)}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{score(row.sentiment_score)}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{score(row.divergence_score)}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{score(row.fragility_score)}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{row.regime ?? "—"}</td>
-                          <td style={{ padding: "0.35rem 0.5rem", maxWidth: "100px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.dominant_narrative ?? "—"}</td>
-                          <td style={{ padding: "0.35rem 0.5rem", color: dirColor, fontWeight: 500 }}>{row.forecast_direction_1d ?? "—"}</td>
-                          <td style={{ padding: "0.35rem 0.5rem" }}>{pct(row.forecast_confidence_1d)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Panel>
-        </div>
-      </Section>
-
-      <Section
-        title="Eksport PDF / raport dzienny"
-        subtitle="Generowanie raportu dla aktywa lub watchlisty."
-      >
-        <div className="grid-2">
-          <Panel title="Raport aktywa">
-            <p className="long-text">
-              Kliknij przycisk „Eksport PDF / raport dzienny”, aby wygenerować
-              raport dla wybranego aktywa.
-            </p>
-            {lastReport ? (
-              <>
-                <MetaRow label="Nazwa pliku" value={lastReport.file_name} />
-                <MetaRow label="Ścieżka pliku" value={lastReport.file_path} />
-              </>
-            ) : null}
-          </Panel>
-
-          <Panel title="Powiadomienia">
-            <DataTable
-              columns={["channel_type", "target", "label", "is_enabled"]}
-              rows={channels}
-            />
-            <div className="spacer" />
-            <DataTable
-              columns={["event_type", "status", "message", "created_at"]}
-              rows={events.slice(0, 10)}
-            />
-          </Panel>
-        </div>
-      </Section>
-
-      <Section
         title="Alerty"
         subtitle="Alerty generowane automatycznie po każdym cyklu synchronizacji."
       >
@@ -2413,137 +2359,13 @@ export default function App() {
       </Section>
 
       <Section
-        title="Bieżąca teza"
-        subtitle="Aktualna teza inwestycyjna, kontrteza i warunki unieważnienia."
-      >
-        <div className="grid-2">
-          <Panel title="Teza">
-            <div className="pill-row">
-              <Pill tone="good">{titleize(latestThesis?.dominant_narrative)}</Pill>
-              <Pill>{titleize(latestThesis?.regime)}</Pill>
-            </div>
-            <p className="long-text">{latestThesis?.thesis ?? "Brak danych."}</p>
-          </Panel>
-
-          <Panel title="Kontrteza">
-            <p className="long-text">
-              {latestThesis?.anti_thesis ?? "Brak danych."}
-            </p>
-            <MetaRow label="Model" value={latestThesis?.model_name ?? "—"} />
-          </Panel>
-        </div>
-      </Section>
-
-      <Section
-        title="Prognoza 1d / 5d / 20d"
-        subtitle="Bieżące prognozy i historia poprzednich prognoz."
-      >
-        <div className="grid-3">
-          {latestForecasts.map((forecast) => (
-            <Panel
-              key={`${forecast.horizon}-${forecast.generated_at}`}
-              title={forecast.horizon}
-            >
-              <div className="pill-row">
-                <Pill
-                  tone={
-                    forecast.direction === "up"
-                      ? "good"
-                      : forecast.direction === "down"
-                      ? "bad"
-                      : "warn"
-                  }
-                >
-                  {forecast.direction}
-                </Pill>
-                <Pill>{titleize(forecast.regime_label)}</Pill>
-              </div>
-              <MetaRow
-                label="Prawdopod. wzrostu"
-                value={formatPct(forecast.up_probability)}
-              />
-              <MetaRow
-                label="Prawdopod. spadku"
-                value={formatPct(forecast.down_probability)}
-              />
-              <MetaRow label="Pewność" value={formatPct(forecast.confidence)} />
-            </Panel>
-          ))}
-        </div>
-
-        <div className="spacer" />
-        <ForecastHistoryChart rows={forecastHistory} />
-      </Section>
-
-      <Section
-        title="Wyniki tez"
-        subtitle="Porównanie tez z faktycznym zachowaniem ceny."
-      >
-        <div className="grid-2">
-          <OutcomesChart rows={thesisOutcomes} />
-          <Panel title="Podsumowanie wyników">
-            <MetaRow
-              label="Łączna liczba wyników"
-              value={String(thesisQualitySummary?.total_outcomes ?? 0)}
-            />
-            <MetaRow
-              label="Śr. zrealizowany zwrot"
-              value={
-                thesisQualitySummary
-                  ? formatPct(thesisQualitySummary.average_realized_return_pct, 3)
-                  : "—"
-              }
-            />
-          </Panel>
-        </div>
-
-        <div className="spacer" />
-
-        <DataTable
-          columns={["Horyzont","Cena bazowa","Cena zrealizowana","Zwrot %","Trafny kierunek","Wynik"]}
-          rows={thesisOutcomes.slice(0, 12).map((r) => ({
-            "Horyzont": r.horizon,
-            "Cena bazowa": r.base_price?.toFixed(2) ?? "—",
-            "Cena zrealizowana": r.realized_price?.toFixed(2) ?? "—",
-            "Zwrot %": formatPct(r.realized_return_pct),
-            "Trafny kierunek": r.was_directionally_correct ? "✓" : "✗",
-            "Wynik": r.outcome_label,
-          }))}
-        />
-      </Section>
-
-      <Section
-        title="Podsumowanie jakości"
-        subtitle="Metryki jakości tez i prognoz na przestrzeni czasu."
-      >
-        <div className="grid-2">
-          <ThesisQualityChart rows={thesisQualityByHorizon} />
-          <Panel title="Jakość prognoz">
-            {forecastQualitySummary.map((item) => (
-              <div key={item.horizon} className="quality-block">
-                <strong>{item.horizon}</strong>
-                <MetaRow
-                  label="Śr. prawdopod. wzrostu"
-                  value={formatPct(item.average_up_probability)}
-                />
-                <MetaRow
-                  label="Śr. pewność"
-                  value={formatPct(item.average_confidence)}
-                />
-              </div>
-            ))}
-          </Panel>
-        </div>
-      </Section>
-
-      <Section
         title="Historia narracji"
         subtitle="Ewolucja dominujących narracji rynkowych."
       >
         <NarrativeHistoryChart rows={narrativeHistory} />
       </Section>
 
-      </> /* koniec zakładki Analizy */}
+      </> /* koniec sekcji dodatkowych zakładki Analizy */}
 
     </PageContainer>
   );}

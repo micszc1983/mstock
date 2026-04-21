@@ -116,7 +116,7 @@ def fetch_search_news_from_finnhub(term: str, asset_id: str, asset_type: AssetTy
 def fetch_quote_from_finnhub(symbol: str) -> List[PricePoint]:
     """
     Pobiera aktualny kurs z Finnhub /quote.
-    Używane jako ostatni fallback gdy Alpaca i Alpha Vantage są niedostępne.
+    Używane jako ostatni fallback gdy inne providery są niedostępne.
     Zwraca 1 punkt danych (dzisiejszy OHLCV).
     Działa tylko dla US stocks na darmowym planie Finnhub.
     """
@@ -377,76 +377,6 @@ def fetch_search_news_from_alpha_vantage_range(
         except Exception:
             continue
     return items
-
-
-# ══════════════════════════════════════════════════════════════════
-#  Alpaca Markets — ceny dzienne i newsy
-#  Dokumentacja: https://docs.alpaca.markets/docs/about-market-data-api
-#  Auth: nagłówki APCA-API-KEY-ID + APCA-API-SECRET-KEY
-#  Limit: 10 000 req/min (plan darmowy: dane z 15-minutowym opóźnieniem)
-#  Rejestracja: https://alpaca.markets/
-# ══════════════════════════════════════════════════════════════════
-
-_ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
-
-
-def _alpaca_headers() -> dict:
-    return {
-        "APCA-API-KEY-ID":     settings.alpaca_api_key,
-        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
-        "Accept":              "application/json",
-    }
-
-
-def fetch_stock_prices_from_alpaca(symbol: str) -> List[PricePoint]:
-    """
-    Pobiera dzienne bary OHLCV z Alpaca dla podanego tickera (US stocks).
-    Endpoint: GET /v2/stocks/{symbol}/bars
-    Parametry: timeframe=1Day, limit=100, feed=iex (darmowy plan)
-    Zwraca listę PricePoint posortowaną rosnąco po dacie.
-    """
-    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
-        raise HTTPException(status_code=400, detail="Brak ALPACA_API_KEY / ALPACA_API_SECRET w .env")
-
-    url = f"{_ALPACA_DATA_BASE}/stocks/{symbol}/bars"
-    end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    start_date = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y-%m-%d")
-
-    params = {
-        "timeframe": "1Day",
-        "start":     start_date,
-        "end":       end_date,
-        "limit":     100,
-        "feed":      "iex",         # IEX feed działa na darmowym planie
-        "sort":      "asc",
-    }
-
-    with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
-        response = client.get(url, params=params, headers=_alpaca_headers())
-        response.raise_for_status()
-        data = response.json()
-
-    bars = data.get("bars") or []
-    if not bars:
-        return []
-
-    points: List[PricePoint] = []
-    for bar in bars:
-        ts_raw = bar.get("t", "")
-        try:
-            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-        except Exception:
-            continue
-        points.append(PricePoint(
-            timestamp=ts,
-            open=float(bar.get("o", 0)),
-            high=float(bar.get("h", 0)),
-            low=float(bar.get("l", 0)),
-            close=float(bar.get("c", 0)),
-            volume=float(bar.get("v", 0)),
-        ))
-
-    return points
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -841,63 +771,155 @@ def fetch_gpw_prices_from_stooq(ticker: str) -> List[PricePoint]:
     return points
 
 
-def fetch_news_from_alpaca(symbol: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
-    """
-    Pobiera newsy z Alpaca dla podanego symbolu.
-    Endpoint: GET /v2/news
-    Parametry: symbols, start, end, limit=50
-    Alpaca news ma wbudowany sentiment (jeśli dostępny w polu).
-    """
-    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+# ══════════════════════════════════════════════════════════════════
+#  RSS Feed parser — GPW (Bankier, StockWatch, PB) i surowce (Kitco, Reuters)
+#  Bez klucza API, bez limitu dziennego.
+# ══════════════════════════════════════════════════════════════════
+
+_GPW_RSS_FEEDS = [
+    "https://www.bankier.pl/rss/wiadomosci.xml",
+    "https://stockwatch.pl/rss/",
+    "https://www.pb.pl/rss.xml",
+]
+
+_COMMODITY_RSS_FEEDS: dict[str, list[str]] = {
+    "gold":    ["https://www.kitco.com/rss/kitconews.xml", "https://feeds.reuters.com/reuters/businessNews"],
+    "silver":  ["https://www.kitco.com/rss/kitconews.xml"],
+    "oil":     ["https://feeds.reuters.com/reuters/businessNews"],
+    "default": ["https://feeds.reuters.com/reuters/businessNews"],
+}
+
+
+def fetch_news_from_rss(
+    asset_id: str,
+    asset_type: AssetType,
+    term: str,
+    feed_urls: list[str],
+    max_items: int = 30,
+) -> List[NewsItem]:
+    """Pobiera newsy z RSS feeds filtrując po term. Bez klucza API."""
+    try:
+        import feedparser  # type: ignore
+    except ImportError:
         return []
 
-    url = f"{_ALPACA_DATA_BASE}/news"
-    end_dt   = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=30)
+    term_l = term.lower()
+    seen: set[str] = set()
+    items: List[NewsItem] = []
 
+    for url in feed_urls:
+        if len(items) >= max_items:
+            break
+        try:
+            feed = feedparser.parse(url)
+        except Exception:
+            continue
+
+        for entry in feed.entries:
+            title = str(entry.get("title") or "")
+            body  = str(entry.get("summary") or entry.get("description") or "")
+            combined = f"{title} {body}".lower()
+            if term_l not in combined:
+                continue
+
+            link = str(entry.get("link") or "")
+            if link in seen:
+                continue
+            seen.add(link)
+
+            pub_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+            if pub_parsed:
+                try:
+                    pub_dt = datetime(*pub_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    pub_dt = datetime.now(timezone.utc)
+            else:
+                pub_dt = datetime.now(timezone.utc)
+
+            if (datetime.now(timezone.utc) - pub_dt).days > 30:
+                continue
+
+            items.append(NewsItem(
+                id=f"rss-{asset_id}-{abs(hash(link or title))}",
+                asset_id=asset_id,
+                source=f"rss:{url.split('/')[2]}",
+                title=title,
+                body=body,
+                url=link,
+                published_at=pub_dt,
+                sentiment_score=infer_sentiment_from_text(title, body),
+                impact_score=infer_impact_from_text(title, body),
+                narratives=infer_narratives_from_text(title, body, asset_type),
+            ))
+            if len(items) >= max_items:
+                break
+
+    return items
+
+
+def fetch_gpw_news_from_rss(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
+    """RSS newsy dla spółek GPW — Bankier, StockWatch, PB."""
+    return fetch_news_from_rss(asset_id, asset_type, term, _GPW_RSS_FEEDS)
+
+
+def fetch_commodity_news_from_rss(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
+    """RSS newsy dla surowców — Kitco, Reuters."""
+    key = term.lower()
+    feeds = _COMMODITY_RSS_FEEDS.get(key, _COMMODITY_RSS_FEEDS["default"])
+    return fetch_news_from_rss(asset_id, asset_type, term, feeds)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  NewsAPI.org — 100 req/dzień (plan darmowy)
+#  Rejestracja: https://newsapi.org/register
+#  Klucz: NEWSAPI_API_KEY w .env
+# ══════════════════════════════════════════════════════════════════
+
+def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
+    """
+    Pobiera newsy z NewsAPI.org dla podanego term.
+    Działa dla GPW ('KGHM'), surowców ('gold price') i US stocks.
+    Darmowy plan: 100 req/dzień, artykuły z ostatnich 30 dni.
+    """
+    if not settings.newsapi_api_key:
+        return []
+
+    from_dt = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
     params = {
-        "symbols": symbol,
-        "start":   start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end":     end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "limit":   50,
-        "sort":    "desc",
-        "include_content": "false",
+        "q":        term,
+        "from":     from_dt,
+        "sortBy":   "publishedAt",
+        "language": "en",
+        "pageSize": 30,
+        "apiKey":   settings.newsapi_api_key,
     }
-
     try:
         with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
-            response = client.get(url, params=params, headers=_alpaca_headers())
+            response = client.get("https://newsapi.org/v2/everything", params=params)
             response.raise_for_status()
             data = response.json()
     except Exception:
         return []
 
     items: List[NewsItem] = []
-    for article in (data.get("news") or []):
-        pub_raw = article.get("created_at") or article.get("updated_at") or ""
+    for art in (data.get("articles") or []):
+        title = str(art.get("title") or "")
+        body  = str(art.get("description") or art.get("content") or "")
+        link  = str(art.get("url") or "")
         try:
-            pub_dt = datetime.fromisoformat(pub_raw.replace("Z", "+00:00"))
+            pub_dt = datetime.fromisoformat((art.get("publishedAt") or "").replace("Z", "+00:00"))
         except Exception:
             pub_dt = datetime.now(timezone.utc)
-
-        headline = article.get("headline") or ""
-        summary  = article.get("summary")  or ""
-        url_val  = article.get("url")       or ""
-        art_id   = str(article.get("id", ""))
-
-        # Alpaca czasem zawiera wstępny sentiment w polu (niestandard)
-        raw_sentiment = float(article.get("sentiment", 0.0) or 0.0)
-
         items.append(NewsItem(
-            id=f"alpaca-{asset_id}-{art_id}",
+            id=f"newsapi-{asset_id}-{abs(hash(link or title))}",
             asset_id=asset_id,
-            source="alpaca:news",
-            title=headline,
-            body=summary,
-            url=url_val,
+            source="newsapi",
+            title=title,
+            body=body,
+            url=link,
             published_at=pub_dt,
-            sentiment_score=raw_sentiment,
-            impact_score=0.65,
+            sentiment_score=infer_sentiment_from_text(title, body),
+            impact_score=infer_impact_from_text(title, body),
+            narratives=infer_narratives_from_text(title, body, asset_type),
         ))
-
     return items

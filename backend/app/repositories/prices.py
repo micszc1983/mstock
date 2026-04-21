@@ -17,7 +17,7 @@ def upsert_price_point(db: Session, asset_id: str, point: PricePoint) -> bool:
     from sqlalchemy import func, cast
     import sqlalchemy as sa
 
-    # Dopasuj po dacie (nie po dokładnym timestamp) — Alpaca używa 04:00:00Z, seed 00:00:00Z
+    # Dopasuj po dacie (nie po dokładnym timestamp) — różni providerzy używają różnych timestampów
     point_date = point.timestamp.date() if hasattr(point.timestamp, "date") else point.timestamp
 
     existing = db.scalar(
@@ -27,7 +27,7 @@ def upsert_price_point(db: Session, asset_id: str, point: PricePoint) -> bool:
         )
     )
     if existing:
-        existing.timestamp = point.timestamp  # zaktualizuj timestamp na nowszy (np. Alpaca)
+        existing.timestamp = point.timestamp  # zaktualizuj timestamp na nowszy
         existing.open   = point.open
         existing.high   = point.high
         existing.low    = point.low

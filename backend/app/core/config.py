@@ -12,8 +12,7 @@ try:
         database_url: str = "sqlite:///./mstock.db"
         alphavantage_api_key: str = ""
         finnhub_api_key: str = ""
-        alpaca_api_key: str = ""
-        alpaca_api_secret: str = ""
+        newsapi_api_key: str = ""
         massive_api_key: str = ""
         twelvedata_api_key: str = ""
         rapidapi_api_key: str = ""
@@ -66,8 +65,7 @@ except ImportError:
         database_url: str = os.getenv("DATABASE_URL", "sqlite:///./mstock.db")
         alphavantage_api_key: str = os.getenv("ALPHAVANTAGE_API_KEY", "")
         finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")
-        alpaca_api_key: str = os.getenv("ALPACA_API_KEY", "")
-        alpaca_api_secret: str = os.getenv("ALPACA_API_SECRET", "")
+        newsapi_api_key: str = os.getenv("NEWSAPI_API_KEY", "")
         massive_api_key: str = os.getenv("MASSIVE_API_KEY", "")
         twelvedata_api_key: str = os.getenv("TWELVEDATA_API_KEY", "")
         rapidapi_api_key: str = os.getenv("RAPIDAPI_API_KEY", "")

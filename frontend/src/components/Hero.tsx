@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Wrench, Moon, Sun, Database, Cpu, Timer, Play } from "lucide-react";
-import type { Asset, MLModelRun, MLStatus } from "../lib/types";
+import type { Asset, AssetRecommendation, MLModelRun, MLStatus } from "../lib/types";
 
 type Props = {
   apiBase: string;
-  setApiBase: (v: string) => void;
   assets: Asset[];
   selectedAsset: string;
   setSelectedAsset: (v: string) => void;
@@ -21,6 +20,7 @@ type Props = {
   displayCurrency: "original" | "PLN";
   setDisplayCurrency: (v: "original" | "PLN") => void;
   usdPlnRate: number | null;
+  recommendations: AssetRecommendation[];
 };
 
 type ProviderState = {
@@ -29,7 +29,7 @@ type ProviderState = {
   last_error: string | null;
   errors_24h: number;
 };
-type ProvidersStatus = Record<"massive" | "twelvedata" | "rapidapi" | "alpaca" | "alphavantage" | "finnhub", ProviderState>;
+type ProvidersStatus = Record<"massive" | "twelvedata" | "rapidapi" | "alphavantage" | "finnhub", ProviderState>;
 
 type AssetSignal = "green" | "red" | "neutral";
 
@@ -131,61 +131,62 @@ function useProviderStatus(apiBase: string, syncCounter?: number) {
   return status;
 }
 
-function useAssetSignals(apiBase: string, assets: Asset[], syncCounter?: number): Map<string, AssetSignal> {
-  const [signals, setSignals] = useState<Map<string, AssetSignal>>(new Map());
-
-  async function fetchAll() {
-    const entries = await Promise.all(
-      assets.map(async (a) => {
-        try {
-          const r = await fetch(`${apiBase}/assets/${a.id}/recommendation`);
-          if (!r.ok) return [a.id, "neutral"] as const;
-          const d = await r.json();
-          const rec   = d.recommendation      as string | null;
-          const ml5   = d.ml_prediction       as string | null;
-          const ml20  = d.ml_20d_prediction   as string | null;
-          const f5d   = d.forecast_dir_5d     as string | null;
-          const f20d  = d.forecast_dir_20d    as string | null;
-          const allGreen =
-            rec  === "KUP"  &&
-            ml5  === "up"   &&
-            (ml20 === null || ml20 === "up") &&
-            f5d  === "up"   &&
-            f20d === "up";
-          const allRed =
-            rec  === "SPRZEDAJ" &&
-            ml5  === "down"     &&
-            (ml20 === null || ml20 === "down") &&
-            f5d  === "down"     &&
-            f20d === "down";
-          return [a.id, allGreen ? "green" : allRed ? "red" : "neutral"] as const;
-        } catch {
-          return [a.id, "neutral"] as const;
-        }
-      })
-    );
-    setSignals(new Map(entries));
-  }
-
-  useEffect(() => {
-    if (assets.length === 0) return;
-    fetchAll();
-    const id = setInterval(fetchAll, 5 * 60_000);
-    return () => clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiBase, assets]);
-
-  useEffect(() => {
-    if (!syncCounter) return;
-    const id = setTimeout(fetchAll, 3000);
-    return () => clearTimeout(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncCounter]);
-
-  return signals;
-}
 
 // ── Formatters ───────────────────────────────────────────────────────────────
+
+function useMarketCountdowns() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  function sessionInfo(tz: string, openH: number, openM: number, closeH: number, closeM: number) {
+    const local = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+    const day = local.getDay(); // 0=Sun, 6=Sat
+    const isWeekend = day === 0 || day === 6;
+    const cur = local.getHours() * 3600 + local.getMinutes() * 60 + local.getSeconds();
+    const open = openH * 3600 + openM * 60;
+    const close = closeH * 3600 + closeM * 60;
+    const isOpen = !isWeekend && cur >= open && cur < close;
+    return { isOpen, secsLeft: isOpen ? close - cur : null };
+  }
+
+  return {
+    gpw: sessionInfo("Europe/Warsaw",   9,  0, 17,  5),
+    us:  sessionInfo("America/New_York", 9, 30, 16,  0),
+  };
+}
+
+function formatSessionTime(secs: number | null): string {
+  if (secs === null || secs <= 0) return "";
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+function SessionChip({ label, info }: { label: string; info: { isOpen: boolean; secsLeft: number | null } }) {
+  return (
+    <div title={info.isOpen ? `Sesja ${label} otwarta — za ${formatSessionTime(info.secsLeft)} zamknięcie` : `Sesja ${label} zamknięta`}
+      style={{ display: "flex", alignItems: "center", gap: 3, cursor: "default" }}>
+      <span style={{
+        width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+        background: info.isOpen ? "var(--ok)" : "var(--text-3)",
+        boxShadow: info.isOpen ? "0 0 0 2px var(--ok)33" : undefined,
+      }} />
+      <span style={{
+        fontSize: 10, fontWeight: 500, whiteSpace: "nowrap",
+        color: info.isOpen ? "var(--text-1)" : "var(--text-3)",
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {label}{info.isOpen ? ` ${formatSessionTime(info.secsLeft)}` : ""}
+      </span>
+    </div>
+  );
+}
 
 function formatCountdown(s: number | null): string {
   if (s === null) return "—";
@@ -283,20 +284,45 @@ function ProviderDot({ name, label, state }: { name: string; label: string; stat
 // ── Hero ─────────────────────────────────────────────────────────────────────
 
 export function Hero({
-  apiBase, setApiBase,
+  apiBase,
   assets, selectedAsset, setSelectedAsset,
   onRefresh, onRepair,
   loading, repairing,
   lastRefreshedAt, mlStatus, mlModels,
   onSync, syncing, syncCounter,
   displayCurrency, setDisplayCurrency, usdPlnRate,
+  recommendations,
 }: Props) {
   const [dark, setDark] = useDarkMode();
-  const dbActive      = useDbPulse(loading);
-  const countdown     = useSchedulerCountdown(apiBase);
-  const providers     = useProviderStatus(apiBase, syncCounter);
-  const isSyncing     = useSyncStatus(apiBase, syncing);
-  const signals       = useAssetSignals(apiBase, assets, syncCounter);
+  const dbActive        = useDbPulse(loading);
+  const countdown       = useSchedulerCountdown(apiBase);
+  const providers       = useProviderStatus(apiBase, syncCounter);
+  const isSyncing       = useSyncStatus(apiBase, syncing);
+  const marketCountdowns = useMarketCountdowns();
+
+  // Sygnały z rekomendacji przekazanych z App (bez osobnych requestów per aktywo)
+  const signals = new Map<string, AssetSignal>(
+    recommendations.map((d) => {
+      const rec  = d.recommendation       as string | null;
+      const ml5  = d.ml_prediction        as string | null;
+      const ml20 = d.ml_20d_prediction    as string | null;
+      const f5d  = d.forecast_dir_5d      as string | null;
+      const f20d = d.forecast_dir_20d     as string | null;
+      const allGreen =
+        rec  === "KUP"  &&
+        ml5  === "up"   &&
+        (ml20 === null || ml20 === "up") &&
+        f5d  === "up"   &&
+        f20d === "up";
+      const allRed =
+        rec  === "SPRZEDAJ" &&
+        ml5  === "down"     &&
+        (ml20 === null || ml20 === "down") &&
+        f5d  === "down"     &&
+        f20d === "down";
+      return [d.asset_id, allGreen ? "green" : allRed ? "red" : "neutral"] as const;
+    })
+  );
 
   const [, tick] = useState(0);
   useEffect(() => { const id = setInterval(() => tick(n => n + 1), 30_000); return () => clearInterval(id); }, []);
@@ -365,12 +391,6 @@ export function Hero({
         </span>
       )}
 
-      {/* Backend URL */}
-      <label className="sticky-field sticky-url">
-        <span className="sticky-label">Backend</span>
-        <input className="sticky-input" value={apiBase} onChange={e => setApiBase(e.target.value)} />
-      </label>
-
       <div className="sticky-sep" />
 
       {/* DB indicator */}
@@ -417,14 +437,21 @@ export function Hero({
 
       <div className="sticky-sep" />
 
-      {/* Provider status — po prawej */}
+      {/* Provider status */}
       <div className="sticky-providers" title="Status providerów danych">
         <ProviderDot name="massive"      label="MAS" state={providers?.massive} />
         <ProviderDot name="twelvedata"   label="12D" state={providers?.twelvedata} />
         <ProviderDot name="rapidapi"     label="RAP" state={providers?.rapidapi} />
-        <ProviderDot name="alpaca"       label="ALP" state={providers?.alpaca} />
         <ProviderDot name="alphavantage" label="AV"  state={providers?.alphavantage} />
         <ProviderDot name="finnhub"      label="FH"  state={providers?.finnhub} />
+      </div>
+
+      <div className="sticky-sep" />
+
+      {/* Odliczanie do końca sesji */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <SessionChip label="GPW" info={marketCountdowns.gpw} />
+        <SessionChip label="US"  info={marketCountdowns.us} />
       </div>
 
       {/* Spacer fills remaining space */}

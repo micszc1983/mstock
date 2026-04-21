@@ -357,6 +357,8 @@ export type AssetRecommendation = {
   action_label: string | null;
   ml_prediction: string | null;
   ml_prob_up: number | null;
+  ml_20d_prediction: string | null;
+  ml_20d_prob_up: number | null;
   ml_thesis_prediction: string | null;
   directional_accuracy: number | null;
   active_alerts: number;

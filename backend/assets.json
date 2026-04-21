@@ -246,9 +246,9 @@
     "sector": null,
     "description": null,
     "seed_price": 2250,
-    "price_symbol": null,
+    "price_symbol": "GC=F",
     "news_symbol": null,
-    "news_term": "gold",
+    "news_term": "gold price",
     "metal_price_fn": "GOLD"
   },
   {
@@ -260,9 +260,9 @@
     "sector": null,
     "description": null,
     "seed_price": 25,
-    "price_symbol": null,
+    "price_symbol": "SI=F",
     "news_symbol": null,
-    "news_term": "silver",
+    "news_term": "silver price",
     "metal_price_fn": "SILVER"
   },
   {
@@ -274,9 +274,9 @@
     "sector": null,
     "description": null,
     "seed_price": 980,
-    "price_symbol": null,
+    "price_symbol": "PL=F",
     "news_symbol": null,
-    "news_term": "platinum",
+    "news_term": "platinum price",
     "metal_price_fn": null
   },
   {
@@ -288,9 +288,9 @@
     "sector": null,
     "description": null,
     "seed_price": 1050,
-    "price_symbol": null,
+    "price_symbol": "PA=F",
     "news_symbol": null,
-    "news_term": "palladium",
+    "news_term": "palladium price",
     "metal_price_fn": null
   }
 ]

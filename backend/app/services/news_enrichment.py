@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from sqlalchemy import select, exists
 from sqlalchemy.orm import Session
 
+from app.db.models import NewsItemORM, NewsNLPRunORM
 from app.mappers import asset_to_schema, news_to_schema
 from app.repositories.assets import get_asset
 from app.repositories.news import list_news
@@ -17,19 +19,29 @@ from app.schemas.nlp import NewsNLPResponse, NewsNarrativePredictionResponse
 from app.services.nlp import build_nlp_payload
 
 
-def enrich_news_for_asset(db: Session, asset_id: str, limit: int = 50) -> int:
+def enrich_news_for_asset(db: Session, asset_id: str, limit: int = 100) -> int:
     asset_row = get_asset(db, asset_id)
     if asset_row is None:
         return 0
 
     asset = asset_to_schema(asset_row)
-    news_rows = list_news(db, asset_id, limit=limit)
+
+    # Pobierz tylko newsy BEZ istniejącego NLP run — stopniowo nadrabia zaległości
+    unenriched_rows = db.scalars(
+        select(NewsItemORM)
+        .where(
+            NewsItemORM.asset_id == asset_id,
+            ~exists().where(NewsNLPRunORM.news_id == NewsItemORM.id),
+        )
+        .order_by(NewsItemORM.published_at.desc())
+        .limit(limit)
+    ).all()
+
     enriched = 0
-    for row in news_rows:
+    for row in unenriched_rows:
         item = news_to_schema(row)
         text = f"{item.title}\n\n{item.body}"
         payload = build_nlp_payload(text, asset.name, asset.symbol, AssetType(asset.type), sector=asset_row.sector)
-        delete_nlp_for_news(db, item.id)
         insert_nlp_run(
             db,
             news_id=item.id,

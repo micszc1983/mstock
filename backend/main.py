@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
             traceback.print_exc()
 
 
-        # Usuń duplikaty cen (ten sam asset + ta sama data, różne timestamps — seed vs Alpaca)
+        # Usuń duplikaty cen (ten sam asset + ta sama data, różne timestamps)
         try:
             from sqlalchemy import text
             with db:
@@ -376,8 +376,7 @@ def admin_provider_status(db=None):
             "massive":      provider_info("massive",      bool(settings.massive_api_key)),
             "twelvedata":   provider_info("twelvedata",   bool(settings.twelvedata_api_key)),
             "rapidapi":     provider_info("rapidapi",     bool(settings.rapidapi_api_key)),
-            "alpaca":       provider_info("alpaca",       bool(settings.alpaca_api_key and settings.alpaca_api_secret)),
-            "alphavantage": provider_info("alphavantage", bool(settings.alphavantage_api_key)),
+"alphavantage": provider_info("alphavantage", bool(settings.alphavantage_api_key)),
             "finnhub":      provider_info("finnhub",      bool(settings.finnhub_api_key)),
         }
     finally:

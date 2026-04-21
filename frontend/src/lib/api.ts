@@ -355,4 +355,14 @@ export const api = {
 
   mlAvailableModels: () =>
     fetchJson<{ available: string[] }>(`${_activeBase}/ml/models/available`),
+
+  enrichNews: (assetId: string, limit = 200) =>
+    postJson<{ asset_id: string; enriched: number }>(
+      `${_activeBase}/assets/${assetId}/news/enrich?limit=${limit}`
+    ),
+
+  enrichAllNews: (limitPerAsset = 200) =>
+    postJson<{ enriched: number; per_asset: Record<string, number> }>(
+      `${_activeBase}/news/enrich/all?limit_per_asset=${limitPerAsset}`
+    ),
 };

@@ -47,6 +47,34 @@ def _hours_ago(dt: Optional[datetime]) -> Optional[float]:
     return round(delta.total_seconds() / 3600, 1)
 
 
+def _last_trading_day() -> "date":
+    """Zwraca ostatni dzień roboczy (pon-pt) włącznie z dzisiaj."""
+    from datetime import date
+    d = now_utc().date()
+    while d.weekday() >= 5:  # sobota=5, niedziela=6
+        d -= timedelta(days=1)
+    return d
+
+
+def _is_market_data_stale(last_ts: Optional[datetime], threshold_h: int = 52) -> bool:
+    """
+    Zwraca True jeśli dane są przestarzałe, uwzględniając weekendy.
+    Ceny z ostatniego dnia roboczego (piątek) nie są uznawane za stale
+    przez cały weekend — do następnego dnia roboczego + threshold_h.
+    """
+    if last_ts is None:
+        return True
+    from datetime import date
+    last_date = ensure_utc(last_ts).date()
+    last_trading = _last_trading_day()
+    # Dane z ostatniego dnia handlowego → nie stale (nawet jeśli minęło >52h)
+    if last_date >= last_trading:
+        return False
+    # Starsze → klasyczny próg
+    hours = _hours_ago(last_ts)
+    return bool(hours and hours > threshold_h)
+
+
 def _score_price(q: PriceQuality) -> float:
     s = 0.0
     if q.total_points >= 60:
@@ -152,7 +180,7 @@ def _analyze_prices(db: Session, asset_id: str, asset_type: str) -> PriceQuality
     total = len(rows)
     last_ts = ensure_utc(rows[-1].timestamp) if rows else None
     staleness = _hours_ago(last_ts)
-    stale_threshold = 72 if asset_type == "metal" else 52   # metale mają weekendy + brak OHLCV
+    stale_threshold = 72 if asset_type == "metal" else 52
 
     # Gap detection: sprawdź ile dni roboczych brakuje w ostatnich 30 dniach
     gap_count = 0
@@ -179,7 +207,7 @@ def _analyze_prices(db: Session, asset_id: str, asset_type: str) -> PriceQuality
         total_points=total,
         last_timestamp=last_ts,
         staleness_hours=staleness,
-        is_stale=bool(staleness and staleness > stale_threshold),
+        is_stale=_is_market_data_stale(last_ts, stale_threshold),
         gap_count=gap_count,
         gap_pct=gap_pct,
         score=0.0,
@@ -234,7 +262,7 @@ def _analyze_news(db: Session, asset_id: str) -> NewsQuality:
         items_30d=items_30d,
         last_timestamp=last_ts,
         staleness_hours=staleness,
-        is_stale=bool(staleness and staleness > 72),
+        is_stale=_is_market_data_stale(last_ts, 72),
         nlp_enriched=nlp_enriched,
         nlp_coverage_pct=nlp_pct,
         score=0.0,
@@ -280,7 +308,7 @@ def _analyze_features(db: Session, asset_id: str) -> FeatureQuality:
     q = FeatureQuality(
         has_snapshot=True,
         staleness_hours=staleness,
-        is_stale=bool(staleness and staleness > 52),
+        is_stale=_is_market_data_stale(ensure_utc(feat.snapshot_at), 52),
         scores_nonzero=scores_ok,
         has_all_forecasts=has_all_fc,
         has_decision_snapshot=has_decision,
