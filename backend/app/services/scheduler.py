@@ -310,6 +310,15 @@ def run_periodic_sync() -> None:
                 _step_outcomes(db, asset, r)
                 _step_alerts(db, asset, r)
 
+            # ── Earnings sync (raz na cykl, dla wszystkich aktywów) ────────
+            try:
+                from app.services.earnings_service import sync_all_earnings
+                synced = sync_all_earnings(db)
+                if synced:
+                    r.log(f"Earnings synced: {sum(synced.values())} records for {len(synced)} assets")
+            except Exception as exc:
+                r.err("sync_earnings", exc)
+
             # ── Global steps ───────────────────────────────────────────────
             print("[scheduler] → ML pipeline")
             _step_ml_dataset(db, r)

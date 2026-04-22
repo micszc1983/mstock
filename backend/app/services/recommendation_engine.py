@@ -93,6 +93,13 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     active = [a for a in alerts if a.status == "active"]
     has_critical = any(a.severity in ("critical", "high") for a in active)
 
+    # ── Earnings surprise ──────────────────────────────────────────────────
+    try:
+        from app.services.earnings_service import get_latest_earnings_surprise
+        earnings_surprise_pct = get_latest_earnings_surprise(db, asset_id)
+    except Exception:
+        earnings_surprise_pct = None
+
     # ══════════════════════════════════════════════════════════════════════
     # COMPOSITE SCORE — ważona suma znormalizowanych sygnałów
     # Każdy sygnał → wkład w [-1, +1], potem suma × wagi → [−100, +100]
@@ -184,6 +191,12 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     if feature.put_call_ratio is not None:
         add("Wskaźnik P/C", feature.put_call_ratio,
             _norm(feature.put_call_ratio, 0.70, 0.60) * -1, 0.04)
+
+    # 16. Earnings surprise — EPS beat/miss z ostatnich 90 dni
+    #     Centrum 0%, skala 15%; +15% zaskoczenie = +1.0 (bullish)
+    if earnings_surprise_pct is not None:
+        add("Zaskoczenie EPS", earnings_surprise_pct,
+            _norm(earnings_surprise_pct, 0.0, 15.0), 0.07)
 
     # ── Oblicz composite score ──────────────────────────────────────────
     total_weight = sum(w for _, _, _, w in contributions)
@@ -290,6 +303,7 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         implied_volatility=round(feature.implied_volatility * 100, 1) if feature.implied_volatility is not None else None,
         put_call_ratio=round(feature.put_call_ratio, 3) if feature.put_call_ratio is not None else None,
         iv_rank=round(feature.iv_rank, 1) if feature.iv_rank is not None else None,
+        earnings_surprise_pct=round(earnings_surprise_pct, 2) if earnings_surprise_pct is not None else None,
     )
 
 

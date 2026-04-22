@@ -368,9 +368,44 @@ export type AssetRecommendation = {
   top_signals: SignalContribution[];
   snapshot_at: string | null;
   data_complete: boolean;
-  implied_volatility: number | null;  // ATM IV w % (np. 35.2)
-  put_call_ratio: number | null;      // put vol / call vol
-  iv_rank: number | null;             // 0-100: percentyl IV w 52-tygodniowym zakresie
+  implied_volatility: number | null;
+  put_call_ratio: number | null;
+  iv_rank: number | null;
+  earnings_surprise_pct: number | null;
+};
+
+export type EarningsRecord = {
+  id: number;
+  asset_id: string;
+  report_date: string;          // ISO date "2025-01-28"
+  fiscal_period: string | null; // "2025Q1"
+  eps_estimate: number | null;
+  eps_actual: number | null;
+  revenue_estimate: number | null;
+  revenue_actual: number | null;
+  eps_surprise_pct: number | null;
+  surprise_label: "BEAT" | "MISS" | "MEET" | null;
+  is_upcoming: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EarningsCalendarEntry = {
+  asset_id: string;
+  symbol: string;
+  name: string;
+  report_date: string;
+  fiscal_period: string | null;
+  eps_estimate: number | null;
+  eps_actual: number | null;
+  eps_surprise_pct: number | null;
+  surprise_label: "BEAT" | "MISS" | "MEET" | null;
+  is_upcoming: boolean;
+};
+
+export type EarningsCalendarResponse = {
+  upcoming: EarningsCalendarEntry[];
+  recent: EarningsCalendarEntry[];
 };
 
 export type PriceQuality    = { total_points: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; gap_count: number; gap_pct: number; score: number; };

@@ -932,6 +932,132 @@ def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> 
     return items
 
 
+# ── Dane wynikowe (Earnings) ───────────────────────────────────────────────────
+
+def fetch_earnings_from_finnhub(symbol: str) -> list[dict]:
+    """
+    Pobiera historyczne wyniki kwartalne (EPS) z Finnhub.
+    Endpoint: /stock/earnings — darmowy plan, US stocks.
+    GPW stocks zwrócą pustą listę (graceful fallback).
+
+    Zwraca listę słowników:
+      {report_date, fiscal_period, eps_estimate, eps_actual, eps_surprise_pct}
+    """
+    if not settings.finnhub_api_key:
+        return []
+    try:
+        url = "https://finnhub.io/api/v1/stock/earnings"
+        params = {"symbol": symbol, "limit": 8, "token": settings.finnhub_api_key}
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        if not isinstance(data, list):
+            return []
+
+        from datetime import date as _date
+        import math
+        results = []
+        for item in data:
+            period_str = item.get("period")  # "2024-09-30"
+            if not period_str:
+                continue
+            try:
+                report_date = _date.fromisoformat(period_str)
+            except Exception:
+                continue
+
+            year   = item.get("year")
+            quarter = item.get("quarter")
+            fiscal_period = f"{year}Q{quarter}" if year and quarter else None
+
+            est    = item.get("estimate")
+            actual = item.get("actual")
+            surp_pct = item.get("surprisePercent")
+
+            # Oblicz surprise_pct sami jeśli brakuje
+            if surp_pct is None and est is not None and actual is not None:
+                try:
+                    denom = abs(float(est))
+                    surp_pct = ((float(actual) - float(est)) / denom * 100) if denom > 0.0001 else 0.0
+                except Exception:
+                    pass
+
+            if surp_pct is not None and not math.isnan(float(surp_pct)):
+                surp_pct = round(float(surp_pct), 2)
+                if surp_pct > 5:
+                    label = "BEAT"
+                elif surp_pct < -5:
+                    label = "MISS"
+                else:
+                    label = "MEET"
+            else:
+                surp_pct = None
+                label = None
+
+            results.append({
+                "report_date": report_date,
+                "fiscal_period": fiscal_period,
+                "eps_estimate": float(est) if est is not None else None,
+                "eps_actual": float(actual) if actual is not None else None,
+                "eps_surprise_pct": surp_pct,
+                "surprise_label": label,
+                "is_upcoming": False,
+            })
+        return results
+    except Exception:
+        return []
+
+
+def fetch_upcoming_earnings_from_yfinance(symbol: str) -> list[dict]:
+    """
+    Pobiera najbliższy planowany termin publikacji wyników z yfinance.
+    Używane dla US stocks i GPW (te ostatnie zazwyczaj bez danych).
+    Zwraca listę z 0 lub 1 rekordem.
+    """
+    try:
+        import yfinance as yf
+        from datetime import date as _date, datetime as _dt
+        ticker = yf.Ticker(symbol)
+        cal = ticker.calendar
+        if not cal:
+            return []
+
+        # yfinance zwraca dict z kluczem "Earnings Date" (Timestamp lub lista)
+        earn_dates = cal.get("Earnings Date") or cal.get("earnings_date")
+        if earn_dates is None:
+            return []
+
+        # Może być lista lub pojedynczy Timestamp
+        if not isinstance(earn_dates, list):
+            earn_dates = [earn_dates]
+
+        results = []
+        today = _date.today()
+        for ed in earn_dates:
+            try:
+                if hasattr(ed, "date"):
+                    d = ed.date()
+                else:
+                    d = _dt.fromisoformat(str(ed)).date()
+                if d >= today:
+                    eps_est = cal.get("Earnings Average") or cal.get("earnings_average")
+                    results.append({
+                        "report_date": d,
+                        "fiscal_period": None,
+                        "eps_estimate": float(eps_est) if eps_est is not None else None,
+                        "eps_actual": None,
+                        "eps_surprise_pct": None,
+                        "surprise_label": None,
+                        "is_upcoming": True,
+                    })
+            except Exception:
+                continue
+        return results
+    except Exception:
+        return []
+
+
 # ── Dane opcyjne ──────────────────────────────────────────────────────────────
 
 def fetch_options_data(symbol: str) -> dict:

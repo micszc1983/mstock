@@ -46,6 +46,8 @@ import type {
   WalkForwardBacktest,
   Watchlist,
   MLModelComparison,
+  EarningsCalendarResponse,
+  EarningsRecord,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -93,7 +95,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -138,6 +140,8 @@ export default function App() {
   const [priceHistory, setPriceHistory] = useState<PriceBar[]>([]);
   const [ensembleSignal, setEnsembleSignal] = useState<EnsembleSignal | null>(null);
   const [ensembleLeaderboard, setEnsembleLeaderboard] = useState<EnsembleLeaderboard[]>([]);
+  const [earningsCalendar, setEarningsCalendar] = useState<EarningsCalendarResponse>({ upcoming: [], recent: [] });
+  const [assetEarnings, setAssetEarnings] = useState<EarningsRecord[]>([]);
   const [ensembleMode, setEnsembleMode] = useState<string>("ensemble_weighted");
   const [showAddAsset, setShowAddAsset] = useState(false);
   const [newAsset, setNewAsset] = useState<AssetCreate>({
@@ -289,6 +293,8 @@ export default function App() {
         currentAllComparisons,
         currentDataQuality,
         currentEnsembleLeaderboard,
+        currentEarningsCalendar,
+        currentAssetEarnings,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -303,6 +309,8 @@ export default function App() {
         api.allHeuristicVsMl().catch(() => []),
         api.dataQuality().catch(() => null),
         api.ensembleLeaderboard().catch(() => []),
+        api.earningsCalendar().catch(() => ({ upcoming: [], recent: [] })),
+        api.assetEarnings(selectedAsset).catch(() => []),
       ]);
 
       setEvents(notificationEvents);
@@ -315,6 +323,8 @@ export default function App() {
       setAllComparisons(currentAllComparisons);
       setDataQuality(currentDataQuality);
       setEnsembleLeaderboard(currentEnsembleLeaderboard);
+      setEarningsCalendar(currentEarningsCalendar);
+      setAssetEarnings(currentAssetEarnings);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -727,7 +737,7 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["portfolio", "Portfel"], ["earnings", "Wyniki spółek"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -2406,6 +2416,138 @@ async function notifyFirstEmail() {
       </Section>
 
       </> /* koniec sekcji dodatkowych zakładki Analizy */}
+
+      {/* ── Zakładka Wyniki spółek ───────────────────────────────────────── */}
+      {activeTab === "earnings" && (() => {
+        const surpriseBadge = (label: string | null, pct: number | null) => {
+          if (!label) return null;
+          const colors: Record<string, { bg: string; color: string }> = {
+            BEAT: { bg: "rgba(22,163,74,0.12)", color: "#16a34a" },
+            MISS: { bg: "rgba(220,38,38,0.12)", color: "#dc2626" },
+            MEET: { bg: "rgba(180,87,9,0.10)", color: "#b45309" },
+          };
+          const s = colors[label] ?? { bg: "var(--bg-subtle)", color: "var(--text-2)" };
+          return (
+            <span style={{
+              padding: "0.15rem 0.45rem", borderRadius: "5px", fontSize: "0.72rem",
+              fontWeight: 700, background: s.bg, color: s.color,
+            }}>
+              {label}{pct != null ? ` ${pct > 0 ? "+" : ""}${pct.toFixed(1)}%` : ""}
+            </span>
+          );
+        };
+
+        const fmtDate = (d: string) =>
+          new Date(d).toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric" });
+        const fmtEps = (v: number | null) => v != null ? v.toFixed(2) : "—";
+
+        return (<>
+          <Section title="Kalendarz wyników" subtitle="Nadchodzące raporty kwartalne śledzonych spółek.">
+            {earningsCalendar.upcoming.length === 0 ? (
+              <p style={{ color: "var(--text-3)", fontSize: "0.82rem" }}>
+                Brak nadchodzących wyników. Uruchom synchronizację:
+                <button style={{ marginLeft: "0.5rem", padding: "0.2rem 0.6rem", borderRadius: 5, border: "1px solid var(--border)", cursor: "pointer", fontSize: "0.78rem" }}
+                  onClick={() => api.syncEarnings().then(() => fetchData())}>
+                  Sync Wyniki
+                </button>
+              </p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                      {["Data", "Symbol", "Spółka", "EPS (est.)", "Kwartał"].map(h => (
+                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {earningsCalendar.upcoming.map((e, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--border)", cursor: "pointer" }}
+                        onClick={() => { setSelectedAsset(e.asset_id); setActiveTab("analysis"); }}>
+                        <td style={{ padding: "0.3rem 0.5rem", fontWeight: 600 }}>{fmtDate(e.report_date)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--accent)", fontWeight: 700 }}>{e.symbol}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{e.name}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{fmtEps(e.eps_estimate)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-3)", fontSize: "0.72rem" }}>{e.fiscal_period ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Section>
+
+          <Section title="Ostatnie wyniki — zaskoczenia" subtitle="Raporty z ostatnich 8 tygodni. Kliknij wiersz aby przejść do aktywa.">
+            {earningsCalendar.recent.length === 0 ? (
+              <p style={{ color: "var(--text-3)", fontSize: "0.82rem" }}>
+                Brak ostatnich wyników. Kliknij <strong>Sync Wyniki</strong> powyżej.
+              </p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                      {["Data", "Symbol", "Spółka", "EPS est.", "EPS aktual.", "Niespodzianka", "Kwartał"].map(h => (
+                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {earningsCalendar.recent.map((e, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--border)", cursor: "pointer" }}
+                        onClick={() => { setSelectedAsset(e.asset_id); setActiveTab("analysis"); }}>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{fmtDate(e.report_date)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--accent)", fontWeight: 700 }}>{e.symbol}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{e.name}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{fmtEps(e.eps_estimate)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", fontWeight: 600 }}>{fmtEps(e.eps_actual)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{surpriseBadge(e.surprise_label, e.eps_surprise_pct)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-3)", fontSize: "0.72rem" }}>{e.fiscal_period ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Section>
+
+          <Section title={`Szczegóły: ${assets.find(a => a.id === selectedAsset)?.name ?? selectedAsset}`}
+            subtitle="Historia wyników kwartalnych dla wybranego aktywa.">
+            {assetEarnings.length === 0 ? (
+              <p style={{ color: "var(--text-3)", fontSize: "0.82rem" }}>Brak danych wynikowych dla tego aktywa.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                      {["Kwartał", "Data", "EPS est.", "EPS aktual.", "Niespodzianka", "Status"].map(h => (
+                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assetEarnings.map((e, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "0.3rem 0.5rem", fontWeight: 600 }}>{e.fiscal_period ?? "—"}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{fmtDate(e.report_date)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{fmtEps(e.eps_estimate)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", fontWeight: e.eps_actual != null ? 600 : 400 }}>{fmtEps(e.eps_actual)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>{surpriseBadge(e.surprise_label, e.eps_surprise_pct)}</td>
+                        <td style={{ padding: "0.3rem 0.5rem" }}>
+                          {e.is_upcoming
+                            ? <span style={{ color: "var(--text-3)", fontSize: "0.72rem" }}>oczekiwany</span>
+                            : <span style={{ color: "#16a34a", fontSize: "0.72rem" }}>✓ opublikowany</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Section>
+        </>);
+      })()}
 
     </PageContainer>
   );}

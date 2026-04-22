@@ -64,3 +64,6 @@ class AssetRecommendation(BaseModel):
     implied_volatility: Optional[float] = None   # ATM IV w % (np. 35.2)
     put_call_ratio: Optional[float] = None       # put vol / call vol
     iv_rank: Optional[float] = None              # 0-100: gdzie bieżące IV w 52-tygodniowym zakresie
+
+    # Dane wynikowe
+    earnings_surprise_pct: Optional[float] = None  # EPS surprise % ostatniego raportu (< 90 dni)

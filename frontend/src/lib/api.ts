@@ -32,6 +32,8 @@ import type {
   MLExplanation,
   MLModelComparison,
   Watchlist,
+  EarningsCalendarResponse,
+  EarningsRecord,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -365,4 +367,13 @@ export const api = {
     postJson<{ enriched: number; per_asset: Record<string, number> }>(
       `${_activeBase}/news/enrich/all?limit_per_asset=${limitPerAsset}`
     ),
+
+  earningsCalendar: () =>
+    fetchJson<EarningsCalendarResponse>(`${_activeBase}/earnings/calendar`),
+
+  assetEarnings: (assetId: string, limit = 8) =>
+    fetchJson<EarningsRecord[]>(`${_activeBase}/assets/${assetId}/earnings?limit=${limit}`),
+
+  syncEarnings: () =>
+    postJson<{ started: boolean; message: string }>(`${_activeBase}/sync/earnings`),
 };

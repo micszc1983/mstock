@@ -23,6 +23,7 @@ from app.api.routes.quality import router as quality_router
 from app.api.routes.data_quality import router as data_quality_router
 from app.api.routes.ensemble import router as ensemble_router
 from app.api.routes.recommendations import router as recommendations_router
+from app.api.routes.earnings import router as earnings_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.repositories.assets import list_assets
@@ -76,6 +77,30 @@ async def lifespan(app: FastAPI):
             print("[startup] migracja: dodano kolumny opcyjne (IV, P/C, IV rank) do daily_asset_features")
         except Exception:
             pass  # Kolumny już istnieją — ignoruj
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS earnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
+                    report_date DATE NOT NULL,
+                    fiscal_period VARCHAR(16),
+                    eps_estimate FLOAT,
+                    eps_actual FLOAT,
+                    revenue_estimate FLOAT,
+                    revenue_actual FLOAT,
+                    eps_surprise_pct FLOAT,
+                    surprise_label VARCHAR(8),
+                    is_upcoming BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_asset_id ON earnings(asset_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_report_date ON earnings(report_date)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_is_upcoming ON earnings(is_upcoming)"))
+            print("[startup] migracja: tabela earnings gotowa")
+        except Exception:
+            pass
 
     print("[startup] tabele DB gotowe")
 
@@ -205,6 +230,7 @@ app.include_router(evaluation_router)
 app.include_router(data_quality_router)
 app.include_router(ensemble_router)
 app.include_router(recommendations_router)
+app.include_router(earnings_router)
 
 
 # ---------------------------------------------------------------------------

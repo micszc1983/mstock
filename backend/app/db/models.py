@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -395,3 +395,21 @@ class EnsembleRecordORM(Base):
     ml_correct: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     ensemble_correct: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     winner: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+
+
+class EarningsORM(Base):
+    __tablename__ = "earnings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    fiscal_period: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)   # np. "2025Q1"
+    eps_estimate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    eps_actual: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    revenue_estimate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    revenue_actual: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    eps_surprise_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # (actual-est)/|est|*100
+    surprise_label: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)   # BEAT|MISS|MEET
+    is_upcoming: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
