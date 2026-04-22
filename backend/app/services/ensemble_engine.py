@@ -415,27 +415,20 @@ def build_leaderboard(db: Session) -> list[EnsembleLeaderboard]:
     results = []
     for asset_row in list_assets(db):
         records = list_ensemble_records(db, asset_row.id, limit=500)
-        evaluated = [r for r in records if r.winner is not None]
-        if not evaluated:
-            results.append(EnsembleLeaderboard(
-                asset_id=asset_row.id, name=asset_row.name,
-                total_records=len(records),
-                heuristic_wins=0, ml_wins=0, ensemble_wins=0, ties=0,
-                heuristic_win_rate=0.0, ml_win_rate=0.0, ensemble_win_rate=0.0,
-                recommended_mode="ensemble_weighted",
-                avg_heuristic_confidence=0.0, avg_ml_confidence=0.0,
-                last_updated=None,
-            ))
-            continue
 
-        h_wins   = sum(1 for r in evaluated if r.winner == "heuristic")
-        ml_wins  = sum(1 for r in evaluated if r.winner == "ml")
-        ens_wins = sum(1 for r in evaluated if r.winner == "ensemble")
-        ties     = sum(1 for r in evaluated if r.winner == "tie")
-        total    = len(evaluated)
+        evaluated = [r for r in records if r.heuristic_correct is not None
+                     or r.ml_correct is not None or r.ensemble_correct is not None]
 
-        rates = {"heuristic": h_wins / total, "ml": ml_wins / total, "ensemble": ens_wins / total}
-        recommended = max(rates, key=rates.get)
+        h_ev  = [r for r in evaluated if r.heuristic_correct is not None]
+        ml_ev = [r for r in evaluated if r.ml_correct is not None]
+        en_ev = [r for r in evaluated if r.ensemble_correct is not None]
+
+        h_acc  = sum(1 for r in h_ev  if r.heuristic_correct) / len(h_ev)  if h_ev  else 0.0
+        ml_acc = sum(1 for r in ml_ev if r.ml_correct)        / len(ml_ev) if ml_ev else 0.0
+        en_acc = sum(1 for r in en_ev if r.ensemble_correct)  / len(en_ev) if en_ev else 0.0
+
+        accs = {"heuristic": h_acc, "ml": ml_acc, "ensemble_weighted": en_acc}
+        recommended = max(accs, key=accs.get) if evaluated else "ensemble_weighted"
 
         avg_h_conf  = mean(r.heuristic_confidence for r in records if r.heuristic_confidence) if records else 0.0
         avg_ml_conf = mean(r.ml_confidence for r in records if r.ml_confidence) if records else 0.0
@@ -444,15 +437,15 @@ def build_leaderboard(db: Session) -> list[EnsembleLeaderboard]:
         results.append(EnsembleLeaderboard(
             asset_id=asset_row.id, name=asset_row.name,
             total_records=len(records),
-            heuristic_wins=h_wins, ml_wins=ml_wins, ensemble_wins=ens_wins, ties=ties,
-            heuristic_win_rate=round(rates["heuristic"], 3),
-            ml_win_rate=round(rates["ml"], 3),
-            ensemble_win_rate=round(rates["ensemble"], 3),
+            evaluated_records=len(evaluated),
+            heuristic_accuracy=round(h_acc, 3),
+            ml_accuracy=round(ml_acc, 3),
+            ensemble_accuracy=round(en_acc, 3),
             recommended_mode=recommended,
             avg_heuristic_confidence=round(avg_h_conf, 1),
             avg_ml_confidence=round(avg_ml_conf, 1),
             last_updated=last,
         ))
 
-    results.sort(key=lambda r: -(r.ml_win_rate + r.ensemble_win_rate))
+    results.sort(key=lambda r: -(r.heuristic_accuracy + r.ml_accuracy + r.ensemble_accuracy))
     return results

@@ -329,6 +329,40 @@ def admin_send_portfolio_report():
     return {"started": True, "to_email": to}
 
 
+@app.post("/admin/rebuild-ml-predictions")
+def admin_rebuild_ml_predictions():
+    """Odbuduj tabelę ml_predictions (usuwa i tworzy od nowa, potem uruchamia scoring)."""
+    from app.db.session import SessionLocal
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        db.execute(text("DROP TABLE IF EXISTS ml_predictions"))
+        db.execute(text("""
+            CREATE TABLE ml_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_id VARCHAR(64) NOT NULL,
+                snapshot_at DATETIME NOT NULL,
+                model_run_id INTEGER NOT NULL,
+                target_name VARCHAR(64) NOT NULL,
+                probability_up FLOAT NOT NULL,
+                predicted_label VARCHAR(16) NOT NULL,
+                raw_json TEXT NOT NULL
+            )
+        """))
+        db.execute(text("CREATE INDEX ix_ml_predictions_asset_id ON ml_predictions(asset_id)"))
+        db.execute(text("CREATE INDEX ix_ml_predictions_target_name ON ml_predictions(target_name)"))
+        db.execute(text("CREATE INDEX ix_ml_predictions_snapshot_at ON ml_predictions(snapshot_at)"))
+        db.commit()
+    finally:
+        db.close()
+    # Uruchom scoring dla wszystkich aktywów w tle
+    import threading
+    from app.services.scheduler import run_cycle
+    t = threading.Thread(target=run_cycle, daemon=True)
+    t.start()
+    return {"status": "ok", "message": "Tabela ml_predictions odtworzona, scoring uruchomiony w tle"}
+
+
 @app.post("/admin/backfill-features")
 def admin_backfill_features(days_back: int = 60):
     """Jednorazowy backfill historycznych feature snapshotów (buduje dataset ML)."""

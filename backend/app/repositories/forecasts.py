@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, func
 from sqlalchemy.orm import Session
 
 from app.db.models import ForecastORM
@@ -54,6 +54,6 @@ def delete_forecast_for_timestamp(db: Session, asset_id: str, generated_at) -> N
     db.execute(
         delete(ForecastORM).where(
             ForecastORM.asset_id == asset_id,
-            ForecastORM.generated_at == generated_at,
+            func.date(ForecastORM.generated_at) == func.date(generated_at),
         )
     )

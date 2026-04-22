@@ -64,18 +64,15 @@ class EnsembleRecord(BaseModel):
 
 
 class EnsembleLeaderboard(BaseModel):
-    """Podsumowanie: kto wygrywa per aktywo."""
+    """Podsumowanie trafności per aktywo."""
     asset_id: str
     name: str
     total_records: int
-    heuristic_wins: int
-    ml_wins: int
-    ensemble_wins: int
-    ties: int
-    heuristic_win_rate: float
-    ml_win_rate: float
-    ensemble_win_rate: float
-    recommended_mode: str         # który tryb najlepszy historycznie
+    evaluated_records: int        # rekordy z wypełnionym wynikiem (outcome po 5d)
+    heuristic_accuracy: float     # % poprawnych predykcji heurystyki (0-1)
+    ml_accuracy: float            # % poprawnych predykcji ML (0-1)
+    ensemble_accuracy: float      # % poprawnych predykcji ensemble (0-1)
+    recommended_mode: str         # tryb z najwyższą historyczną trafnością
     avg_heuristic_confidence: float
     avg_ml_confidence: float
     last_updated: Optional[datetime]

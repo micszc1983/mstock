@@ -1222,8 +1222,11 @@ async function notifyFirstEmail() {
           <Panel title="Rejestr modeli">
             <DataTable
               maxRows={12}
-              columns={["Cel","Model","Wierszy","Aktywny","Wytrenowano"]}
+              columns={["Aktywo","Cel","Model","Wierszy","Aktywny","Wytrenowano"]}
               rows={mlModelsState.map((row) => ({
+                "Aktywo": row.asset_id
+                  ? (assets.find(a => a.id === row.asset_id)?.name ?? row.asset_id)
+                  : "Globalny",
                 "Cel": row.target_name,
                 "Model": row.model_name,
                 "Wierszy": String(row.dataset_rows),
@@ -1488,26 +1491,38 @@ async function notifyFirstEmail() {
         {ensembleLeaderboard.length > 0 && (
           <>
             <div style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--text-2)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.5rem" }}>
-              Leaderboard — kto historycznie wygrywa
+              Leaderboard — historyczna trafność predykcji
             </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.79rem" }}>
                 <thead>
                   <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                    {["Aktywo","Rekordów","Heurystyka %","ML %","Ensemble %","Remisy","Zalecany tryb","Śr. conf H","Śr. conf ML"].map(h => (
-                      <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontWeight: 600, fontSize: "0.72rem", color: "var(--text-2)", whiteSpace: "nowrap" }}>{h}</th>
+                    {([
+                      ["Aktywo", "Symbol i nazwa aktywa. Kliknij wiersz aby wybrać."],
+                      ["Sygnałów", "Łączna liczba zapisanych sygnałów ensemble (ocenionych i oczekujących na outcome po 5 dniach)."],
+                      ["Ocenionych", "Liczba sygnałów z wypełnionym wynikiem (outcome znany po ~5 dniach od zapisu). Reszta to sygnały zbyt świeże."],
+                      ["Trafność H", "% sygnałów heurystycznych gdzie przewidziany kierunek (up/down) był zgodny z faktycznym ruchem ceny po 5 dniach. Pogrubiona = najwyższa trafność."],
+                      ["Trafność ML", "% sygnałów ML gdzie przewidziany kierunek był zgodny z faktycznym ruchem ceny po 5 dniach. Pogrubiona = najwyższa trafność."],
+                      ["Trafność Ens", "% sygnałów ensemble gdzie zbiorczy kierunek był zgodny z faktycznym ruchem ceny po 5 dniach. Pogrubiona = najwyższa trafność."],
+                      ["Zalecany tryb", "Tryb z najwyższą historyczną trafnością dla tego aktywa. Używaj go w konfiguracji ensemble."],
+                      ["Pewność H", "Średnia pewność sygnałów heurystycznych (0–100%). Wyższa = heurystyka bardziej przekonana do swoich sygnałów."],
+                      ["Pewność ML", "Średnia pewność sygnałów ML (0–100%). Wyższa = modele ML bardziej przekonane do swoich predykcji."],
+                    ] as [string, string][]).map(([label, tip]) => (
+                      <th key={label} title={tip} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontWeight: 600, fontSize: "0.72rem", color: "var(--text-2)", whiteSpace: "nowrap", cursor: "help" }}>
+                        {label} <span style={{ fontSize: "0.62rem", opacity: 0.55, fontWeight: 400 }}>?</span>
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {ensembleLeaderboard.map(row => {
-                    const best = Math.max(row.heuristic_win_rate, row.ml_win_rate, row.ensemble_win_rate);
+                    const best = Math.max(row.heuristic_accuracy, row.ml_accuracy, row.ensemble_accuracy);
                     const modeColors: Record<string,string> = { heuristic:"#4f86f7", ml:"#22c55e", ensemble_weighted:"#f59e0b", ensemble_majority:"#a855f7" };
                     const modeLabels: Record<string,string> = { heuristic:"Heurystyka", ml:"ML", ensemble_weighted:"Ensemble ważony", ensemble_majority:"Ensemble większościowy" };
-                    const winCell = (rate: number, key: string) => (
-                      <td key={key} style={{ padding: "0.3rem 0.5rem", fontWeight: rate === best && rate > 0 ? 700 : 400,
-                        color: rate === best && rate > 0 ? "#16a34a" : "inherit" }}>
-                        {row.total_records > 0 ? `${(rate*100).toFixed(0)}%` : "—"}
+                    const accCell = (acc: number, key: string) => (
+                      <td key={key} style={{ padding: "0.3rem 0.5rem", fontWeight: acc === best && acc > 0 ? 700 : 400,
+                        color: acc === best && acc > 0 ? "#16a34a" : "inherit" }}>
+                        {row.evaluated_records > 0 ? `${(acc * 100).toFixed(0)}%` : "—"}
                       </td>
                     );
                     return (
@@ -1515,10 +1530,10 @@ async function notifyFirstEmail() {
                         onClick={() => setSelectedAsset(row.asset_id)}>
                         <td style={{ padding: "0.3rem 0.5rem", fontWeight: 600 }}>{row.name}</td>
                         <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{row.total_records}</td>
-                        {winCell(row.heuristic_win_rate, "h")}
-                        {winCell(row.ml_win_rate, "ml")}
-                        {winCell(row.ensemble_win_rate, "ens")}
-                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{row.ties}</td>
+                        <td style={{ padding: "0.3rem 0.5rem", color: "var(--text-2)" }}>{row.evaluated_records}</td>
+                        {accCell(row.heuristic_accuracy, "h")}
+                        {accCell(row.ml_accuracy, "ml")}
+                        {accCell(row.ensemble_accuracy, "ens")}
                         <td style={{ padding: "0.3rem 0.5rem" }}>
                           <span style={{ padding: "0.15rem 0.45rem", borderRadius: "4px", fontSize: "0.72rem",
                             background: `${modeColors[row.recommended_mode] ?? "#888"}18`,
@@ -1535,7 +1550,7 @@ async function notifyFirstEmail() {
               </table>
             </div>
             <p style={{ fontSize: "0.72rem", color: "var(--text-2)", marginTop: "0.5rem" }}>
-              Leaderboard wypełnia się po tym jak ensemble records dostaną outcomes (po ~5 dniach od zapisania sygnału).
+              Trafność wypełnia się po tym jak sygnały dostaną outcomes (po ~5 dniach od zapisania).
               Używaj "Ensemble ważony" dopóki leaderboard nie wskaże wyraźnego zwycięzcy.
             </p>
           </>

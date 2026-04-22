@@ -210,6 +210,7 @@ from app.schemas.ml import MLBacktestResponse, MLModelRunResponse, MLPredictionR
 def ml_model_run_to_schema(row: MLModelRunORM) -> MLModelRunResponse:
     return MLModelRunResponse(
         id=row.id,
+        asset_id=row.asset_id,
         model_name=row.model_name,
         target_name=row.target_name,
         trained_at=row.trained_at,

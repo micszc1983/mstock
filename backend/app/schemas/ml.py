@@ -69,6 +69,7 @@ class MLTrainRequest(BaseModel):
 
 class MLModelRunResponse(BaseModel):
     id: int
+    asset_id: Optional[str]
     model_name: str
     target_name: str
     trained_at: datetime

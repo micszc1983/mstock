@@ -74,9 +74,12 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     decision = get_latest_decision_snapshot(db, asset_id)
 
     # ── ML Predictions ─────────────────────────────────────────────────────
-    ml_5d     = get_latest_prediction(db, asset_id, "target_up_5d")
-    ml_20d    = get_latest_prediction(db, asset_id, "target_up_20d")
-    ml_thesis = get_latest_prediction(db, asset_id, "target_thesis_success")
+    try:
+        ml_5d     = get_latest_prediction(db, asset_id, "target_up_5d")
+        ml_20d    = get_latest_prediction(db, asset_id, "target_up_20d")
+        ml_thesis = get_latest_prediction(db, asset_id, "target_thesis_success")
+    except Exception:
+        ml_5d = ml_20d = ml_thesis = None
 
     # ── Jakość historyczna ─────────────────────────────────────────────────
     try:

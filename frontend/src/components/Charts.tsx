@@ -72,7 +72,16 @@ export function OutcomesChart({ rows }: { rows: ThesisOutcome[] }) {
 
 // ── Forecast History Chart ───────────────────────────────────────────────────
 export function ForecastHistoryChart({ rows }: { rows: Forecast[] }) {
-  const data = rows
+  // Deduplicate by calendar date — keep the latest entry per day (rows are desc by generated_at)
+  const seen = new Set<string>();
+  const deduped = rows.filter(r => {
+    const day = r.generated_at.slice(0, 10);
+    if (seen.has(day)) return false;
+    seen.add(day);
+    return true;
+  });
+
+  const data = deduped
     .slice(0, 30)
     .reverse()
     .map(r => ({

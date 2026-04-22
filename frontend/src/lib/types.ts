@@ -169,6 +169,7 @@ export type MLDatasetStats = {
 
 export type MLModelRun = {
   id: number;
+  asset_id: string | null;
   model_name: string;
   target_name: string;
   trained_at: string;
@@ -402,9 +403,8 @@ export type EnsembleSignal = {
   action: string; rationale: string;
 };
 export type EnsembleLeaderboard = {
-  asset_id: string; name: string; total_records: number;
-  heuristic_wins: number; ml_wins: number; ensemble_wins: number; ties: number;
-  heuristic_win_rate: number; ml_win_rate: number; ensemble_win_rate: number;
+  asset_id: string; name: string; total_records: number; evaluated_records: number;
+  heuristic_accuracy: number; ml_accuracy: number; ensemble_accuracy: number;
   recommended_mode: string;
   avg_heuristic_confidence: number; avg_ml_confidence: number;
   last_updated: string | null;
