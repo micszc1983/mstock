@@ -1586,6 +1586,8 @@ async function notifyFirstEmail() {
                     ["Conv.","conviction_score","Conviction score z decision support 0–100. Siła przekonania o kierunku ruchu — im wyższy tym bardziej zdecydowany sygnał."],
                     ["Ryzyko","risk_score","Poziom ryzyka 0–100 z decision support. Wyższy = bardziej niebezpieczna pozycja. Uwzględnia kruchość, zmienność i dywergencje."],
                     ["ML 5d","ml_prob_up","Prawdopodobieństwo wzrostu za 5 dni wg modelu ML (Logistic Regression). Dostępne po wytrenowaniu modelu."],
+                    ["IV","implied_volatility","Implied Volatility (zmienność implikowana) opcji ATM z najbliższej serii. Wysoka IV (>40%) = rynek wycenia duże ryzyko. Niska IV (<15%) = spokój. Dostępna tylko dla US stocks i ETF."],
+                    ["P/C","put_call_ratio","Put/Call Ratio — stosunek wolumenu put do call. >1.0 = dominacja put (niedźwiedzie), <0.5 = dominacja call (byki). Neutralnie ~0.7."],
                     ["Trafn. hist.","directional_accuracy","Historyczna trafność kierunkowa tez dla tego aktywa w %. Liczone z zamkniętych outcomes. >55% = model działa."],
                     ["Alerty","active_alerts","Liczba aktywnych alertów. ⚠ = alert krytyczny (fragility, degradacja prognozy). Wpływa negatywnie na wynik kompozytowy."],
                   ].map(([label, key, tip]) => (
@@ -1675,6 +1677,29 @@ async function notifyFirstEmail() {
                         {r.ml_prediction ? (
                           <span style={{ color: r.ml_prediction === "up" ? "#16a34a" : "#dc2626", fontWeight: 500 }}>
                             {r.ml_prediction === "up" ? "▲" : "▼"} {pct(r.ml_prob_up)}
+                          </span>
+                        ) : <span style={{ color: "var(--text-3)" }}>—</span>}
+                      </td>
+                      <td style={{ padding: "0.4rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}>
+                        {r.implied_volatility != null ? (
+                          <span style={{
+                            color: r.implied_volatility > 50 ? "#dc2626" : r.implied_volatility > 30 ? "#b45309" : "#16a34a",
+                            fontWeight: 500,
+                          }}>
+                            {r.implied_volatility.toFixed(1)}%
+                          </span>
+                        ) : <span style={{ color: "var(--text-3)" }}>—</span>}
+                        {r.iv_rank != null && (
+                          <div style={{ fontSize: "0.65rem", color: "var(--text-3)" }}>rank {r.iv_rank.toFixed(0)}</div>
+                        )}
+                      </td>
+                      <td style={{ padding: "0.4rem 0.5rem", fontSize: "0.75rem" }}>
+                        {r.put_call_ratio != null ? (
+                          <span style={{
+                            color: r.put_call_ratio > 1.0 ? "#dc2626" : r.put_call_ratio < 0.5 ? "#16a34a" : "inherit",
+                            fontWeight: r.put_call_ratio > 1.0 || r.put_call_ratio < 0.5 ? 600 : 400,
+                          }}>
+                            {r.put_call_ratio.toFixed(2)}
                           </span>
                         ) : <span style={{ color: "var(--text-3)" }}>—</span>}
                       </td>

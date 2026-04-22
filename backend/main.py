@@ -69,6 +69,13 @@ async def lifespan(app: FastAPI):
             print("[startup] migracja: tabela portfolio_positions gotowa")
         except Exception:
             pass
+        try:
+            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN implied_volatility FLOAT"))
+            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN put_call_ratio FLOAT"))
+            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN iv_rank FLOAT"))
+            print("[startup] migracja: dodano kolumny opcyjne (IV, P/C, IV rank) do daily_asset_features")
+        except Exception:
+            pass  # Kolumny już istnieją — ignoruj
 
     print("[startup] tabele DB gotowe")
 

@@ -59,3 +59,8 @@ class AssetRecommendation(BaseModel):
 
     snapshot_at: Optional[datetime]
     data_complete: bool               # False gdy brak kluczowych danych
+
+    # Dane opcyjne (dostępne dla US stocks i ETF; None dla GPW / metali)
+    implied_volatility: Optional[float] = None   # ATM IV w % (np. 35.2)
+    put_call_ratio: Optional[float] = None       # put vol / call vol
+    iv_rank: Optional[float] = None              # 0-100: gdzie bieżące IV w 52-tygodniowym zakresie

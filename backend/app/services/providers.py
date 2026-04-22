@@ -930,3 +930,78 @@ def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> 
             narratives=infer_narratives_from_text(title, body, asset_type),
         ))
     return items
+
+
+# ── Dane opcyjne ──────────────────────────────────────────────────────────────
+
+def fetch_options_data(symbol: str) -> dict:
+    """
+    Pobiera IV (ATM, najbliższa seria) i P/C ratio z yfinance.
+    Zwraca {} gdy brak danych (GPW, metale bez opcji, błąd sieci).
+
+    Klucze: implied_volatility (float, 0..1), put_call_ratio (float).
+    """
+    try:
+        import yfinance as yf
+        import math
+
+        ticker = yf.Ticker(symbol)
+        expirations = ticker.options          # () gdy brak opcji
+        if not expirations:
+            return {}
+
+        # Używamy najbliższej serii — najwyższa płynność
+        chain = ticker.option_chain(expirations[0])
+        calls = chain.calls
+        puts  = chain.puts
+
+        if calls.empty and puts.empty:
+            return {}
+
+        # ── P/C ratio z wolumenu ──────────────────────────────────────────────
+        call_vol = float(calls["volume"].sum()) if not calls.empty else 0.0
+        put_vol  = float(puts["volume"].sum())  if not puts.empty  else 0.0
+        # skipna=True jest domyślne dla pandas sum, ale sum() zwraca nan gdy wszystko nan
+        if math.isnan(call_vol):
+            call_vol = 0.0
+        if math.isnan(put_vol):
+            put_vol = 0.0
+        pc_ratio = round(put_vol / call_vol, 4) if call_vol > 0 else None
+
+        # ── ATM IV z serii call ───────────────────────────────────────────────
+        iv: float | None = None
+        if not calls.empty and "impliedVolatility" in calls.columns:
+            try:
+                info = ticker.fast_info
+                spot = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
+                calls_cp = calls.copy()
+                if spot and spot > 0:
+                    calls_cp["_dist"] = (calls_cp["strike"] - spot).abs()
+                    atm_row = calls_cp.loc[calls_cp["_dist"].idxmin()]
+                else:
+                    # Fallback: call z najniższą odległością od mediany strike
+                    med = calls_cp["strike"].median()
+                    calls_cp["_dist"] = (calls_cp["strike"] - med).abs()
+                    atm_row = calls_cp.loc[calls_cp["_dist"].idxmin()]
+
+                iv_raw = atm_row["impliedVolatility"]
+                if iv_raw is not None and not math.isnan(float(iv_raw)) and float(iv_raw) > 0:
+                    iv = round(float(iv_raw), 6)
+            except Exception:
+                # Fallback: średnia IV wszystkich strike'ów
+                try:
+                    mean_iv = calls["impliedVolatility"].dropna().mean()
+                    if not math.isnan(mean_iv) and mean_iv > 0:
+                        iv = round(float(mean_iv), 6)
+                except Exception:
+                    pass
+
+        result: dict = {}
+        if iv is not None:
+            result["implied_volatility"] = iv
+        if pc_ratio is not None:
+            result["put_call_ratio"] = pc_ratio
+        return result
+
+    except Exception:
+        return {}

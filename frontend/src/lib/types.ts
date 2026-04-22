@@ -368,6 +368,9 @@ export type AssetRecommendation = {
   top_signals: SignalContribution[];
   snapshot_at: string | null;
   data_complete: boolean;
+  implied_volatility: number | null;  // ATM IV w % (np. 35.2)
+  put_call_ratio: number | null;      // put vol / call vol
+  iv_rank: number | null;             // 0-100: percentyl IV w 52-tygodniowym zakresie
 };
 
 export type PriceQuality    = { total_points: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; gap_count: number; gap_pct: number; score: number; };

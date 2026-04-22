@@ -173,6 +173,18 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         add("Wiele alertów",   float(len(active)),
             -0.3, 0.05)
 
+    # 14. Implied Volatility — wysoka IV = większa niepewność/ryzyko (bearish)
+    #     Normalizacja: centrum 0.30 (30%), skala 0.30; wartości >0.60 = panika
+    if feature.implied_volatility is not None:
+        add("Impl. zmienność (IV)", feature.implied_volatility * 100,
+            _norm(feature.implied_volatility, 0.30, 0.30) * -1, 0.05)
+
+    # 15. P/C ratio — >1 = przewaga put (bearish), <0.5 = przewaga call (bullish)
+    #     Centrum 0.70 (typowy poziom rynku), skala 0.60
+    if feature.put_call_ratio is not None:
+        add("Wskaźnik P/C", feature.put_call_ratio,
+            _norm(feature.put_call_ratio, 0.70, 0.60) * -1, 0.04)
+
     # ── Oblicz composite score ──────────────────────────────────────────
     total_weight = sum(w for _, _, _, w in contributions)
     weighted_sum = sum(c * w for _, _, c, w in contributions)
@@ -275,6 +287,9 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         top_signals=top_signals,
         snapshot_at=ensure_utc(feature.snapshot_at),
         data_complete=True,
+        implied_volatility=round(feature.implied_volatility * 100, 1) if feature.implied_volatility is not None else None,
+        put_call_ratio=round(feature.put_call_ratio, 3) if feature.put_call_ratio is not None else None,
+        iv_rank=round(feature.iv_rank, 1) if feature.iv_rank is not None else None,
     )
 
 

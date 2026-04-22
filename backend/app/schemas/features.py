@@ -26,6 +26,9 @@ class DailyAssetFeatureSnapshot(BaseModel):
     volatility_10d: float
     momentum_20d: float
     news_count_7d: int
+    implied_volatility: Optional[float] = None   # ATM IV z najbliższej serii opcji (wartość absolutna, np. 0.35 = 35%)
+    put_call_ratio: Optional[float] = None       # wolumen put / wolumen call; >1 = bearish, <0.5 = bullish
+    iv_rank: Optional[float] = None              # percentyl bieżącego IV w ostatnich 252 dniach (0-100)
 
 
 class ForecastResponse(BaseModel):

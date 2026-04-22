@@ -46,6 +46,27 @@ def _news_count_7d(news) -> int:
     return sum(1 for item in news if ensure_utc(item.published_at) >= cutoff)
 
 
+def _calc_iv_rank(db: Session, asset_id: str, current_iv: float | None) -> float | None:
+    """Percentyl bieżącego IV w ostatnich 252 dniach (0-100). None gdy < 30 obserwacji."""
+    if current_iv is None:
+        return None
+    from sqlalchemy import select as _sel
+    from app.db.models import DailyAssetFeatureORM
+    ivs = db.scalars(
+        _sel(DailyAssetFeatureORM.implied_volatility)
+        .where(DailyAssetFeatureORM.asset_id == asset_id,
+               DailyAssetFeatureORM.implied_volatility.isnot(None))
+        .order_by(DailyAssetFeatureORM.snapshot_at.desc())
+        .limit(252)
+    ).all()
+    if len(ivs) < 30:
+        return None
+    iv_min, iv_max = min(ivs), max(ivs)
+    if iv_max == iv_min:
+        return 50.0
+    return round((current_iv - iv_min) / (iv_max - iv_min) * 100, 1)
+
+
 def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> DailyAssetFeatureSnapshot | None:
     asset = asset_to_schema(asset_row)
     prices = [price_to_schema(row) for row in list_prices(db, asset.id)]
@@ -55,6 +76,15 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
 
     overview = build_overview(asset, prices, news)
     snapshot_at = prices[-1].timestamp
+
+    # Dane opcyjne — tylko dla bieżącego snapshotu (historyczne IV niedostępne za darmo)
+    from app.services.providers import fetch_options_data
+    options_symbol = asset_row.price_symbol or asset.symbol
+    opts = fetch_options_data(options_symbol)
+    iv = opts.get("implied_volatility")
+    pc = opts.get("put_call_ratio")
+    iv_r = _calc_iv_rank(db, asset.id, iv)
+
     snapshot = DailyAssetFeatureSnapshot(
         asset_id=asset.id,
         snapshot_at=snapshot_at,
@@ -73,6 +103,9 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
         volatility_10d=_calc_volatility_10d(prices),
         momentum_20d=_calc_momentum_20d(prices),
         news_count_7d=_news_count_7d(news),
+        implied_volatility=iv,
+        put_call_ratio=pc,
+        iv_rank=iv_r,
     )
 
     # Zachowuj historię: insertuj tylko jeśli nie ma jeszcze snapshotu dla tej daty.

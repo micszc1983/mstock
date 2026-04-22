@@ -108,6 +108,9 @@ class DailyAssetFeatureORM(Base):
     volatility_10d: Mapped[float] = mapped_column(Float)
     momentum_20d: Mapped[float] = mapped_column(Float)
     news_count_7d: Mapped[int] = mapped_column(Integer, default=0)
+    implied_volatility: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    put_call_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    iv_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class ForecastORM(Base):
