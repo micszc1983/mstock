@@ -720,9 +720,9 @@ def fetch_gpw_prices_from_stooq(ticker: str) -> List[PricePoint]:
     ticker: symbol GPW z .WA, np. "PKN.WA", "KGH.WA"
     Nazwa zachowana dla kompatybilności z sync.py.
     """
-    # Upewnij się że ticker ma .WA
     symbol = ticker.upper()
-    if not symbol.endswith(".WA"):
+    # Dodaj .WA tylko dla GPW — nie dla futures (GC=F), innych giełd (.AS, .L itp.) ani ETF
+    if "=" not in symbol and "." not in symbol:
         symbol = symbol + ".WA"
 
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5y"
@@ -783,10 +783,12 @@ _GPW_RSS_FEEDS = [
 ]
 
 _COMMODITY_RSS_FEEDS: dict[str, list[str]] = {
-    "gold":    ["https://www.kitco.com/rss/kitconews.xml", "https://feeds.reuters.com/reuters/businessNews"],
-    "silver":  ["https://www.kitco.com/rss/kitconews.xml"],
-    "oil":     ["https://feeds.reuters.com/reuters/businessNews"],
-    "default": ["https://feeds.reuters.com/reuters/businessNews"],
+    "gold":      ["https://www.kitco.com/rss/kitconews.xml", "https://feeds.reuters.com/reuters/businessNews"],
+    "silver":    ["https://www.kitco.com/rss/kitconews.xml"],
+    "platinum":  ["https://www.kitco.com/rss/kitconews.xml"],
+    "palladium": ["https://www.kitco.com/rss/kitconews.xml"],
+    "oil":       ["https://feeds.reuters.com/reuters/businessNews"],
+    "default":   ["https://feeds.reuters.com/reuters/businessNews"],
 }
 
 
@@ -864,8 +866,13 @@ def fetch_gpw_news_from_rss(term: str, asset_id: str, asset_type: AssetType) -> 
 
 def fetch_commodity_news_from_rss(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
     """RSS newsy dla surowców — Kitco, Reuters."""
-    key = term.lower()
-    feeds = _COMMODITY_RSS_FEEDS.get(key, _COMMODITY_RSS_FEEDS["default"])
+    # Najpierw próbuj asset_id, potem pierwsze słowo termu, potem pełny term
+    for key in (asset_id.lower(), term.split()[0].lower(), term.lower()):
+        if key in _COMMODITY_RSS_FEEDS:
+            feeds = _COMMODITY_RSS_FEEDS[key]
+            break
+    else:
+        feeds = _COMMODITY_RSS_FEEDS["default"]
     return fetch_news_from_rss(asset_id, asset_type, term, feeds)
 
 

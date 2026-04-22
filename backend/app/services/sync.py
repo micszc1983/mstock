@@ -236,7 +236,7 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         provider = "rss:commodity"
         items = fetch_commodity_news_from_rss(term, asset.id, asset_type)
         if settings.newsapi_api_key:
-            newsapi_items = fetch_news_from_newsapi(f"{term} price", asset.id, asset_type)
+            newsapi_items = fetch_news_from_newsapi(term, asset.id, asset_type)
             existing_ids = {i.id for i in items}
             items += [i for i in newsapi_items if i.id not in existing_ids]
             if newsapi_items:

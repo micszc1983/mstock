@@ -354,6 +354,10 @@ def _send_daily_portfolio_report() -> None:
     """Wysyła dzienny raport portfela emailem o 23:30."""
     if not settings.smtp_host or not settings.smtp_username:
         return
+    to_email = settings.report_recipient_email or settings.smtp_from_email
+    if not to_email:
+        print("[scheduler] portfolio-report: brak REPORT_RECIPIENT_EMAIL i SMTP_FROM_EMAIL — pomijam")
+        return
     try:
         from app.db.session import SessionLocal
         from app.repositories.portfolio_positions import list_positions
@@ -388,7 +392,7 @@ def _send_daily_portfolio_report() -> None:
                 except Exception as exc:
                     print(f"[scheduler] portfolio-report: błąd rec dla {pos.asset_id}: {exc}")
 
-            result = send_portfolio_report(db, recommendations, to_email="dev@coad.pl")
+            result = send_portfolio_report(db, recommendations, to_email=to_email)
             print(f"[scheduler] portfolio-report: {result.get('detail')}")
         finally:
             db.close()

@@ -24,6 +24,7 @@ try:
         smtp_username: str = ""
         smtp_password: str = ""
         smtp_from_email: str = ""
+        report_recipient_email: str = ""
         twilio_account_sid: str = ""
         twilio_auth_token: str = ""
         twilio_whatsapp_from: str = ""
@@ -77,6 +78,7 @@ except ImportError:
         smtp_username: str = os.getenv("SMTP_USERNAME", "")
         smtp_password: str = os.getenv("SMTP_PASSWORD", "")
         smtp_from_email: str = os.getenv("SMTP_FROM_EMAIL", "")
+        report_recipient_email: str = os.getenv("REPORT_RECIPIENT_EMAIL", "")
         twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
         twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
         twilio_whatsapp_from: str = os.getenv("TWILIO_WHATSAPP_FROM", "")

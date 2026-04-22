@@ -317,6 +317,18 @@ def admin_scheduler_status():
         ],
     }
 
+@app.post("/admin/send-portfolio-report")
+def admin_send_portfolio_report():
+    """Ręczne wysłanie dziennego raportu portfela emailem."""
+    from app.services.scheduler import _send_daily_portfolio_report
+    import threading
+    t = threading.Thread(target=_send_daily_portfolio_report, daemon=True)
+    t.start()
+    from app.core.config import settings
+    to = settings.report_recipient_email or settings.smtp_from_email or "(nie skonfigurowane)"
+    return {"started": True, "to_email": to}
+
+
 @app.post("/admin/backfill-features")
 def admin_backfill_features(days_back: int = 60):
     """Jednorazowy backfill historycznych feature snapshotów (buduje dataset ML)."""
