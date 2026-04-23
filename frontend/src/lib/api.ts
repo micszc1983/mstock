@@ -28,6 +28,7 @@ import type {
   PriceBar,
   EnsembleLeaderboard,
   EnsembleSignal,
+  DynamicWeightInfo,
   DataQualityReport,
   MLExplanation,
   MLModelComparison,
@@ -383,4 +384,7 @@ export const api = {
 
   analyzeLatestEarnings: (assetId: string) =>
     postJson<EarningsCallAnalysis>(`${_activeBase}/assets/${assetId}/earnings/latest/analyze`),
+
+  ensembleWeights: (assetId: string) =>
+    fetchJson<DynamicWeightInfo>(`${_activeBase}/assets/${assetId}/ensemble/weights`),
 };

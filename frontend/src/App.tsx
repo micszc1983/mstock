@@ -49,6 +49,7 @@ import type {
   EarningsCalendarResponse,
   EarningsRecord,
   EarningsCallAnalysis,
+  DynamicWeightInfo,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -141,6 +142,7 @@ export default function App() {
   const [priceHistory, setPriceHistory] = useState<PriceBar[]>([]);
   const [ensembleSignal, setEnsembleSignal] = useState<EnsembleSignal | null>(null);
   const [ensembleLeaderboard, setEnsembleLeaderboard] = useState<EnsembleLeaderboard[]>([]);
+  const [ensembleDynWeights, setEnsembleDynWeights] = useState<DynamicWeightInfo | null>(null);
   const [earningsCalendar, setEarningsCalendar] = useState<EarningsCalendarResponse>({ upcoming: [], recent: [] });
   const [assetEarnings, setAssetEarnings] = useState<EarningsRecord[]>([]);
   const [earningsAnalyses, setEarningsAnalyses] = useState<EarningsCallAnalysis[]>([]);
@@ -299,6 +301,7 @@ export default function App() {
         currentEarningsCalendar,
         currentAssetEarnings,
         currentEarningsAnalyses,
+        currentEnsembleDynWeights,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -316,6 +319,7 @@ export default function App() {
         api.earningsCalendar().catch(() => ({ upcoming: [], recent: [] })),
         api.assetEarnings(selectedAsset).catch(() => []),
         api.earningsAnalyses(selectedAsset).catch(() => []),
+        api.ensembleWeights(selectedAsset).catch(() => null),
       ]);
 
       setEvents(notificationEvents);
@@ -331,6 +335,7 @@ export default function App() {
       setEarningsCalendar(currentEarningsCalendar);
       setAssetEarnings(currentAssetEarnings);
       setEarningsAnalyses(currentEarningsAnalyses);
+      setEnsembleDynWeights(currentEnsembleDynWeights);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -1487,8 +1492,28 @@ async function notifyFirstEmail() {
                       Pewność: {ensembleSignal.final_confidence.toFixed(0)}% &nbsp;|&nbsp; Konsensus: <strong>{ensembleSignal.consensus}</strong> ({(ensembleSignal.consensus_score*100).toFixed(0)}%)
                     </div>
                     {ensembleSignal.mode === "ensemble_weighted" && (
-                      <div style={{ fontSize: "0.7rem", color: "var(--text-3)" }}>
-                        Wagi: heurystyka {(ensembleSignal.heuristic_weight*100).toFixed(0)}% / ML {(ensembleSignal.ml_weight*100).toFixed(0)}%
+                      <div style={{ marginTop: "0.5rem" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.25rem" }}>
+                          <span style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.04em" }}>Wagi</span>
+                          {ensembleSignal.weights_dynamic ? (
+                            <span style={{ fontSize: "0.62rem", padding: "0.05rem 0.35rem", borderRadius: 4, background: "rgba(99,102,241,0.12)", color: "#6366f1", fontWeight: 600 }}>
+                              dynamiczne · {ensembleSignal.weights_evaluated_records} ewaluacji
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: "0.62rem", padding: "0.05rem 0.35rem", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-3)", fontWeight: 500 }}>
+                              domyślne · za mało danych
+                            </span>
+                          )}
+                        </div>
+                        {/* pasek wag */}
+                        <div style={{ display: "flex", height: "10px", borderRadius: 5, overflow: "hidden", gap: "1px" }}>
+                          <div style={{ flex: ensembleSignal.heuristic_weight, background: "#4f86f7" }} title={`Heurystyka ${(ensembleSignal.heuristic_weight*100).toFixed(0)}%`} />
+                          <div style={{ flex: ensembleSignal.ml_weight, background: "#22c55e" }} title={`ML ${(ensembleSignal.ml_weight*100).toFixed(0)}%`} />
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.67rem", marginTop: "0.15rem" }}>
+                          <span style={{ color: "#4f86f7" }}>Heurystyka {(ensembleSignal.heuristic_weight*100).toFixed(0)}%{ensembleDynWeights?.is_dynamic ? ` · ${(ensembleDynWeights.heuristic_accuracy*100).toFixed(0)}% traf.` : ""}</span>
+                          <span style={{ color: "#22c55e" }}>ML {(ensembleSignal.ml_weight*100).toFixed(0)}%{ensembleDynWeights?.is_dynamic ? ` · ${(ensembleDynWeights.ml_accuracy*100).toFixed(0)}% traf.` : ""}</span>
+                        </div>
                       </div>
                     )}
                     <div style={{ fontSize: "0.73rem", color: "var(--text-2)", marginTop: "0.4rem", lineHeight: 1.5 }}>
@@ -2453,7 +2478,7 @@ async function notifyFirstEmail() {
               <p style={{ color: "var(--text-3)", fontSize: "0.82rem" }}>
                 Brak nadchodzących wyników. Uruchom synchronizację:
                 <button style={{ marginLeft: "0.5rem", padding: "0.2rem 0.6rem", borderRadius: 5, border: "1px solid var(--border)", cursor: "pointer", fontSize: "0.78rem" }}
-                  onClick={() => api.syncEarnings().then(() => fetchData())}>
+                  onClick={() => api.syncEarnings().then(() => refresh())}>
                   Sync Wyniki
                 </button>
               </p>

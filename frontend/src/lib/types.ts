@@ -454,7 +454,22 @@ export type EnsembleSignal = {
   final_direction: string; final_confidence: number; final_probability_up: number;
   consensus: string; consensus_score: number;
   heuristic_weight: number; ml_weight: number;
+  weights_dynamic: boolean;
+  weights_method: string;
+  weights_evaluated_records: number;
   action: string; rationale: string;
+};
+
+export type DynamicWeightInfo = {
+  asset_id: string;
+  heuristic_weight: number;
+  ml_weight: number;
+  is_dynamic: boolean;
+  evaluated_records: number;
+  heuristic_accuracy: number;
+  ml_accuracy: number;
+  method: string;
+  min_records_required: number;
 };
 export type EnsembleLeaderboard = {
   asset_id: string; name: string; total_records: number; evaluated_records: number;

@@ -37,10 +37,26 @@ class EnsembleSignal(BaseModel):
     # Wagi ensemble
     heuristic_weight: float      # 0-1
     ml_weight: float             # 0-1
+    weights_dynamic: bool = False         # True gdy wagi obliczone z historii trafności
+    weights_method: str = "default"       # "proportional_accuracy" | "default"
+    weights_evaluated_records: int = 0   # ile rekordów posłużyło do obliczenia wag
 
     # Rekomendacja
     action: str                  # "KUP" | "SPRZEDAJ" | "TRZYMAJ"
     rationale: str
+
+
+class DynamicWeightInfo(BaseModel):
+    """Dynamiczne wagi ensemble obliczone z historycznej trafności."""
+    asset_id: str
+    heuristic_weight: float
+    ml_weight: float
+    is_dynamic: bool              # False gdy za mało danych — użyto domyślnych wag
+    evaluated_records: int        # ile ocenionych rekordów posłużyło do obliczeń
+    heuristic_accuracy: float     # historyczna trafność heurystyki (0-1)
+    ml_accuracy: float            # historyczna trafność ML (0-1)
+    method: str                   # "proportional_accuracy" | "default"
+    min_records_required: int     # minimalna liczba rekordów do aktywacji dynamicznych wag
 
 
 class EnsembleRecord(BaseModel):

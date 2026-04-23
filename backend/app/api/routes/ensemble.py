@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.ensemble import EnsembleConfig, EnsembleLeaderboard, EnsembleSignal
+from app.schemas.ensemble import DynamicWeightInfo, EnsembleConfig, EnsembleLeaderboard, EnsembleSignal
 from app.services.ensemble_engine import (
     DEFAULT_CONFIG,
     build_ensemble_signal,
     build_leaderboard,
+    compute_dynamic_weights,
     fill_ensemble_outcomes,
 )
 
@@ -48,6 +49,12 @@ def record_ensemble_signal(
     if result is None:
         raise HTTPException(status_code=404, detail=f"Brak danych dla {asset_id}")
     return result
+
+
+@router.get("/assets/{asset_id}/ensemble/weights", response_model=DynamicWeightInfo)
+def get_dynamic_weights(asset_id: str, db: Session = Depends(get_db)) -> DynamicWeightInfo:
+    """Dynamiczne wagi ensemble dla aktywa — obliczone z historycznej trafności."""
+    return compute_dynamic_weights(db, asset_id)
 
 
 @router.get("/ensemble/leaderboard", response_model=list[EnsembleLeaderboard])

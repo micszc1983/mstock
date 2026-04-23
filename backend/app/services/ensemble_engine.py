@@ -33,6 +33,7 @@ from app.repositories.forecasts import get_latest_forecasts
 from app.repositories.ml import get_active_model_run, get_all_active_model_runs, get_latest_prediction
 from app.repositories.outcomes import list_outcomes_for_asset
 from app.schemas.ensemble import (
+    DynamicWeightInfo,
     EnsembleConfig,
     EnsembleLeaderboard,
     EnsembleRecord,
@@ -247,6 +248,72 @@ _MODE_LABELS = {
     "ensemble_majority":  "Ensemble większościowy",
 }
 
+_MIN_DYNAMIC_RECORDS = 5   # minimalna liczba ocenionych rekordów do aktywacji dynamicznych wag
+_DYNAMIC_LOOKBACK     = 50  # ile ostatnich rekordów bierzemy pod uwagę
+_WEIGHT_MIN           = 0.2  # dolne ograniczenie wagi (zapobiega całkowitemu wyeliminowaniu systemu)
+_WEIGHT_MAX           = 0.8  # górne ograniczenie wagi
+
+
+def compute_dynamic_weights(
+    db: Session,
+    asset_id: str,
+    min_records: int = _MIN_DYNAMIC_RECORDS,
+    lookback: int = _DYNAMIC_LOOKBACK,
+) -> DynamicWeightInfo:
+    """
+    Oblicza wagi ensemble proporcjonalne do historycznej trafności każdego systemu.
+
+    Algorytm:
+      1. Pobierz ostatnie `lookback` rekordów z wypełnionym outcome dla obu systemów.
+      2. Oblicz trafność: h_acc = heuristic_correct.mean(), ml_acc = ml_correct.mean().
+      3. Wagi proporcjonalne do trafności: w_h = h_acc / (h_acc + ml_acc), skalowane
+         aby nigdy nie wyjść poza [_WEIGHT_MIN, _WEIGHT_MAX].
+      4. Jeśli za mało danych → zwróć DEFAULT_CONFIG wagi.
+    """
+    records = list_ensemble_records(db, asset_id, limit=lookback)
+    evaluated = [
+        r for r in records
+        if r.heuristic_correct is not None and r.ml_correct is not None
+    ]
+
+    if len(evaluated) < min_records:
+        return DynamicWeightInfo(
+            asset_id=asset_id,
+            heuristic_weight=DEFAULT_CONFIG.heuristic_weight,
+            ml_weight=DEFAULT_CONFIG.ml_weight,
+            is_dynamic=False,
+            evaluated_records=len(evaluated),
+            heuristic_accuracy=0.0,
+            ml_accuracy=0.0,
+            method="default",
+            min_records_required=min_records,
+        )
+
+    h_acc  = sum(1 for r in evaluated if r.heuristic_correct) / len(evaluated)
+    ml_acc = sum(1 for r in evaluated if r.ml_correct) / len(evaluated)
+
+    total = h_acc + ml_acc
+    if total == 0.0:
+        w_h = 0.5
+    else:
+        raw_h = h_acc / total
+        w_h = max(_WEIGHT_MIN, min(_WEIGHT_MAX, raw_h))
+
+    w_h  = round(w_h, 4)
+    w_ml = round(1.0 - w_h, 4)
+
+    return DynamicWeightInfo(
+        asset_id=asset_id,
+        heuristic_weight=w_h,
+        ml_weight=w_ml,
+        is_dynamic=True,
+        evaluated_records=len(evaluated),
+        heuristic_accuracy=round(h_acc, 4),
+        ml_accuracy=round(ml_acc, 4),
+        method="proportional_accuracy",
+        min_records_required=min_records,
+    )
+
 
 def build_ensemble_signal(
     db: Session,
@@ -272,6 +339,16 @@ def build_ensemble_signal(
             label = _ML_TARGET_LABELS.get(target, target)
             votes.append(_ml_vote(db, asset_id, target, label))
 
+    # Dla trybu ensemble_weighted: wyznacz dynamiczne wagi z historii trafności
+    dyn_info: DynamicWeightInfo | None = None
+    effective_h_weight = config.heuristic_weight
+    effective_ml_weight = config.ml_weight
+
+    if config.mode == "ensemble_weighted":
+        dyn_info = compute_dynamic_weights(db, asset_id)
+        effective_h_weight  = dyn_info.heuristic_weight
+        effective_ml_weight = dyn_info.ml_weight
+
     # Kombinuj
     if config.mode == "heuristic":
         hv = next((v for v in votes if v.source == "heuristic"), None)
@@ -289,7 +366,7 @@ def build_ensemble_signal(
     elif config.mode == "ensemble_majority":
         prob, conf = _majority_combine(votes)
     else:  # ensemble_weighted
-        prob, conf = _weighted_combine(votes, config.heuristic_weight, config.ml_weight)
+        prob, conf = _weighted_combine(votes, effective_h_weight, effective_ml_weight)
 
     direction = "up" if prob > 52 else "down" if prob < 48 else "neutral"
     action = "KUP" if prob > 60 else "SPRZEDAJ" if prob < 40 else "TRZYMAJ"
@@ -315,8 +392,11 @@ def build_ensemble_signal(
         final_probability_up=prob,
         consensus=consensus,
         consensus_score=consensus_score,
-        heuristic_weight=config.heuristic_weight,
-        ml_weight=config.ml_weight,
+        heuristic_weight=effective_h_weight,
+        ml_weight=effective_ml_weight,
+        weights_dynamic=dyn_info.is_dynamic if dyn_info else False,
+        weights_method=dyn_info.method if dyn_info else "default",
+        weights_evaluated_records=dyn_info.evaluated_records if dyn_info else 0,
         action=action,
         rationale=rationale,
     )
