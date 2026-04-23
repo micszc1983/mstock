@@ -440,28 +440,64 @@ def train_model(
     target_name: str = "target_up_5d",
     model_name: str = "logistic_regression",
     asset_id: str | None = None,
+    use_optuna: bool = False,
+    optuna_trials: int = 30,
 ):
-    from app.services.ml_models.registry import train_single_model as _train_single
+    from app.services.ml_models.registry import (
+        train_single_model as _train_single,
+        cv_score_model as _cv_score,
+        optimize_model as _optimize,
+    )
 
     rows = list_training_rows_for_target(db, target_name, asset_id=asset_id)
     if len(rows) < settings.ml_min_training_rows:
         raise ValueError(f"Not enough rows to train. Need at least {settings.ml_min_training_rows}, got {len(rows)}")
+
+    X_all, y_all, feature_names = _xy(rows, target_name)
+
+    # ── 1. Optuna hyperparameter search (opcjonalne) ─────────────────────────
+    best_params: dict | None = None
+    optuna_result: dict = {}
+    if use_optuna:
+        print(f"[ml] Optuna search: {model_name}/{target_name} ({optuna_trials} trials)…")
+        best_params = _optimize(model_name, X_all, y_all, n_trials=optuna_trials)
+        if best_params:
+            print(f"[ml] Optuna best params: {best_params}")
+            optuna_result = {"optuna_best_params": best_params, "optuna_trials": optuna_trials}
+
+    # ── 2. Trenuj model finalny na podziale 80/20 ────────────────────────────
     split = max(int(len(rows) * 0.8), 1)
     train_rows = rows[:split]
-    test_rows = rows[split:] if split < len(rows) else rows[-max(1, len(rows)//5):]
-    X_train, y_train, feature_names = _xy(train_rows, target_name)
-    X_test, y_test, _ = _xy(test_rows, target_name)
+    test_rows  = rows[split:] if split < len(rows) else rows[-max(1, len(rows) // 5):]
+    X_train, y_train, _ = _xy(train_rows, target_name)
+    X_test,  y_test,  _ = _xy(test_rows,  target_name)
 
     asset_suffix = f"_{asset_id}" if asset_id else ""
     model_path = _models_dir() / f"{model_name}_{target_name}{asset_suffix}.joblib"
 
     model_metrics = _train_single(
-        model_name, X_train, y_train, X_test, y_test, feature_names, str(model_path)
+        model_name, X_train, y_train, X_test, y_test, feature_names,
+        str(model_path), best_params=best_params,
     )
+
+    # ── 3. Stratified K-Fold CV na całym datasecie ───────────────────────────
+    cv_metrics: dict = {}
+    try:
+        cv_result = _cv_score(model_name, X_all, y_all, feature_names,
+                              n_splits=5, best_params=best_params)
+        if cv_result:
+            cv_metrics = cv_result
+            print(f"[ml] CV {model_name}: acc={cv_result['cv_accuracy_mean']:.3f}±{cv_result['cv_accuracy_std']:.3f}  "
+                  f"f1={cv_result['cv_f1_mean']:.3f}±{cv_result['cv_f1_std']:.3f}")
+    except Exception as exc:
+        print(f"[ml] CV skipped: {exc}")
+
     metrics = {
         **model_metrics,
+        **cv_metrics,
+        **optuna_result,
         "train_rows": len(train_rows),
-        "test_rows": len(test_rows),
+        "test_rows":  len(test_rows),
         "feature_names": feature_names,
         "asset_id": asset_id,
     }

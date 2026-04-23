@@ -43,15 +43,46 @@ def train_single_model(
     y_test: list,
     feature_names: list[str],
     model_path: str,
+    best_params: dict | None = None,
 ) -> dict:
-    """
-    Trenuje model o podanej nazwie. Zwraca metryki.
-    Rzuca ImportError jeśli model niedostępny, ValueError jeśli nieznany.
-    """
+    """Trenuje model o podanej nazwie. Zwraca metryki."""
     if model_name not in _MODEL_REGISTRY:
         raise ValueError(f"Nieznany model: {model_name}. Dostępne: {list(_MODEL_REGISTRY.keys())}")
     mod = importlib.import_module(_MODEL_REGISTRY[model_name])
-    return mod.train(X_train, y_train, X_test, y_test, feature_names, model_path)
+    return mod.train(X_train, y_train, X_test, y_test, feature_names, model_path,
+                     best_params=best_params)
+
+
+def cv_score_model(
+    model_name: str,
+    X: list,
+    y: list,
+    feature_names: list[str],
+    n_splits: int = 5,
+    best_params: dict | None = None,
+) -> dict | None:
+    """Stratified K-Fold CV dla modelu. Zwraca mean/std accuracy i F1."""
+    if model_name not in _MODEL_REGISTRY:
+        return None
+    mod = importlib.import_module(_MODEL_REGISTRY[model_name])
+    if not hasattr(mod, "cv_score"):
+        return None
+    return mod.cv_score(X, y, feature_names, n_splits=n_splits, best_params=best_params)
+
+
+def optimize_model(
+    model_name: str,
+    X: list,
+    y: list,
+    n_trials: int = 30,
+) -> dict | None:
+    """Optuna hyperparameter search. Zwraca best_params lub None jeśli model nie wspiera."""
+    if model_name not in _MODEL_REGISTRY:
+        return None
+    mod = importlib.import_module(_MODEL_REGISTRY[model_name])
+    if not hasattr(mod, "optimize"):
+        return None
+    return mod.optimize(X, y, n_trials=n_trials)
 
 
 def predict_proba_single(model_name: str, model_path: str, X: list) -> float:

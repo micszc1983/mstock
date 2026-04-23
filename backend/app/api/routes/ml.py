@@ -48,7 +48,9 @@ def get_dataset_stats(db: Session = Depends(get_db)) -> MLDatasetStatsResponse:
 @router.post("/ml/models/train", response_model=MLModelRunResponse)
 def train(payload: MLTrainRequest, db: Session = Depends(get_db)) -> MLModelRunResponse:
     try:
-        row = train_model(db, target_name=payload.target_name, model_name=payload.model_name, asset_id=payload.asset_id)
+        row = train_model(db, target_name=payload.target_name, model_name=payload.model_name,
+                          asset_id=payload.asset_id, use_optuna=payload.use_optuna,
+                          optuna_trials=payload.optuna_trials)
         return ml_model_run_to_schema(row)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -108,6 +110,14 @@ def model_comparison(target_name: str = "target_up_5d", db: Session = Depends(ge
                 "train_rows": metrics.get("train_rows", run.dataset_rows),
                 "trained_at": run.trained_at.isoformat() if run.trained_at else None,
                 "is_global": run.asset_id is None,
+                # Stratified CV metrics (None jeśli model trenowany bez CV)
+                "cv_accuracy_mean": metrics.get("cv_accuracy_mean"),
+                "cv_accuracy_std":  metrics.get("cv_accuracy_std"),
+                "cv_f1_mean":       metrics.get("cv_f1_mean"),
+                "cv_f1_std":        metrics.get("cv_f1_std"),
+                "cv_folds":         metrics.get("cv_folds"),
+                # Optuna
+                "optuna_best_params": metrics.get("optuna_best_params"),
             })
     return result
 

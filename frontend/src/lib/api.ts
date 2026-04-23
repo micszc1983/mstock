@@ -271,12 +271,16 @@ export const api = {
   trainMlModel: (
     target_name = "target_up_5d",
     model_name = "logistic_regression",
-    asset_id: string | null = null
+    asset_id: string | null = null,
+    use_optuna = false,
+    optuna_trials = 30,
   ) =>
     postJson<MLModelRun>(`${_activeBase}/ml/models/train`, {
       target_name,
       model_name,
       asset_id,
+      use_optuna,
+      optuna_trials,
     }),
 
   mlModels: () => fetchJson<MLModelRun[]>(`${_activeBase}/ml/models`),

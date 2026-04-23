@@ -198,6 +198,12 @@ export type MLModelComparison = {
   train_rows: number;
   trained_at: string | null;
   is_global?: boolean;
+  cv_accuracy_mean?: number | null;
+  cv_accuracy_std?: number | null;
+  cv_f1_mean?: number | null;
+  cv_f1_std?: number | null;
+  cv_folds?: number | null;
+  optuna_best_params?: Record<string, unknown> | null;
 };
 
 export type MLPrediction = {

@@ -154,6 +154,7 @@ export default function App() {
     sector: "", price_symbol: "", news_symbol: "", news_term: "", metal_price_fn: "",
   });
   const [mlActiveTarget, setMlActiveTarget] = useState<string>("target_up_5d");
+  const [useOptuna, setUseOptuna] = useState<boolean>(false);
   const [cmpSort, setCmpSort] = useState<{ col: string; dir: 1 | -1 }>({ col: "asset_id", dir: 1 });
   const [strategyComparison, setStrategyComparison] =
     useState<StrategyComparison | null>(null);
@@ -440,7 +441,7 @@ export default function App() {
     setMlWorking(`Trening ${modelAbbrs} — ${label}…`);
     try {
       for (const modelName of models) {
-        await api.trainMlModel(mlActiveTarget, modelName, selectedAsset);
+        await api.trainMlModel(mlActiveTarget, modelName, selectedAsset, useOptuna);
       }
       setInfo(`Wytrenowano modele (${modelAbbrs}) dla ${selectedAsset} / ${label}.`);
       await refresh();
@@ -907,6 +908,21 @@ async function notifyFirstEmail() {
           <ActivitySquare size={16} />
           Przelicz predykcję ML
         </button>
+        <label
+          data-tip="Optuna przeszuka przestrzeń hiperparametrów (30 prób, 3-fold CV jako cel) i wybierze najlepsze C, max_depth, learning_rate itp. przed treningiem finalnym. Trwa dłużej (~1-3 min per model)."
+          data-tip-side="bottom"
+          style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", cursor: "pointer",
+            padding: "6px 12px", border: "1px solid var(--border-2)", borderRadius: "10px",
+            background: useOptuna ? "rgba(139,92,246,0.10)" : "var(--bg-card)",
+            color: useOptuna ? "#7c3aed" : "var(--text-2)",
+            fontSize: "13px", fontWeight: useOptuna ? 600 : 400,
+            borderColor: useOptuna ? "#7c3aed" : "var(--border-2)",
+            transition: "all 0.15s", userSelect: "none" }}
+        >
+          <input type="checkbox" checked={useOptuna} onChange={e => setUseOptuna(e.target.checked)}
+            style={{ accentColor: "#7c3aed", width: 14, height: 14 }} />
+          Optuna auto-tuning
+        </label>
       </div>
 
       {/* Rząd 2 — pozostałe akcje */}
@@ -1279,14 +1295,18 @@ async function notifyFirstEmail() {
             if (!byAsset[r.asset_id]) byAsset[r.asset_id] = {};
             byAsset[r.asset_id][r.model_name] = r;
           }
-          type PRow = { asset_id: string; maxRows: number; [k: string]: number | string | boolean };
+          type PRow = { asset_id: string; maxRows: number; [k: string]: number | string | boolean | null };
           const pivotRows: PRow[] = Object.entries(byAsset).map(([assetId, models]) => {
             const row: PRow = { asset_id: assetId, maxRows: 0 };
             for (const mn of modelTypes) {
               const m = models[mn];
               const s = MODEL_SHORT[mn] ?? mn;
-              row[`${s}_acc`] = m ? m.accuracy : -1;
-              row[`${s}_f1`]  = m ? m.f1       : -1;
+              row[`${s}_acc`]    = m ? m.accuracy : -1;
+              row[`${s}_f1`]     = m ? m.f1       : -1;
+              row[`${s}_cv_acc`] = m ? (m.cv_accuracy_mean ?? -1) : -1;
+              row[`${s}_cv_f1`]  = m ? (m.cv_f1_mean       ?? -1) : -1;
+              row[`${s}_cv_std`] = m ? (m.cv_f1_std        ?? null) : null;
+              row[`${s}_optuna`] = m ? (m.optuna_best_params ? 1 : 0) : 0;
               row[`${s}_global`] = m ? (m.is_global ?? false) : false;
               if (m && m.train_rows > (row.maxRows as number)) row.maxRows = m.train_rows;
             }
@@ -1318,12 +1338,14 @@ async function notifyFirstEmail() {
             fontWeight: val >= 0.55 ? 600 : 400,
           });
 
-          const colGroups: { col: string; label: string; tooltip: string }[] = [];
+          const colGroups: { col: string; label: string; tooltip: string; isCV?: boolean }[] = [];
           for (const mn of modelTypes) {
             const s = MODEL_SHORT[mn] ?? mn;
             const long = MODEL_LONG[mn] ?? mn;
-            colGroups.push({ col: `${s}_acc`, label: `${s} Acc`, tooltip: `${long}\n\nAccuracy = (TP+TN)/(wszystkie). Jak często model ma rację.` });
-            colGroups.push({ col: `${s}_f1`,  label: `${s} F1`,  tooltip: `${long}\n\nF1 = 2·Prec·Recall/(Prec+Recall). Lepszy od Accuracy przy niezbalansowanych klasach.` });
+            colGroups.push({ col: `${s}_acc`,    label: `${s} Acc`,    tooltip: `${long}\n\nAccuracy na zbiorze testowym (20% danych). Jak często model ma rację.` });
+            colGroups.push({ col: `${s}_f1`,     label: `${s} F1`,     tooltip: `${long}\n\nF1 na zbiorze testowym. Lepszy od Accuracy przy niezbalansowanych klasach.` });
+            colGroups.push({ col: `${s}_cv_acc`, label: `${s} CV Acc`, tooltip: `${long}\n\nStratified 5-Fold CV Accuracy — uśredniona po 5 foldach na całym datasecie. Bardziej wiarygodna niż jednokrotny split testowy.`, isCV: true });
+            colGroups.push({ col: `${s}_cv_f1`,  label: `${s} CV F1`,  tooltip: `${long}\n\nStratified 5-Fold CV F1 — uśredniona po 5 foldach. ±std dostępne po najechaniu.`, isCV: true });
           }
 
           return (
@@ -1361,14 +1383,29 @@ async function notifyFirstEmail() {
                           <td style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", fontWeight: 600 }}>
                             {(row.asset_id as string).toUpperCase()}
                           </td>
-                          {colGroups.map(({ col }) => {
+                          {colGroups.map(({ col, isCV }) => {
                             const v = row[col] as number;
-                            const modelShort = col.replace(/_acc$|_f1$/, "");
+                            const modelShort = col.replace(/_(acc|f1|cv_acc|cv_f1)$/, "");
                             const isGlobal = row[`${modelShort}_global`] as boolean;
+                            const std = isCV && col.endsWith("_cv_f1") ? row[`${modelShort}_cv_std`] as number | null : null;
+                            const hasOptuna = !!(row[`${modelShort}_optuna`]);
+                            const cellTitle = [
+                              isGlobal ? "Model globalny (nie per-aktywo)" : "",
+                              std != null ? `±${(std * 100).toFixed(1)}% std` : "",
+                              hasOptuna ? "Trenowany z Optuna auto-tuning" : "",
+                            ].filter(Boolean).join(" · ") || undefined;
                             return (
-                              <td key={col} style={{ ...tdStyle(v), opacity: isGlobal ? 0.65 : 1 }}
-                                title={isGlobal ? "Model globalny (nie per-aktywo)" : undefined}>
-                                {v < 0 ? "—" : `${(v * 100).toFixed(1)}%${isGlobal ? "*" : ""}`}
+                              <td key={col} style={{ ...tdStyle(v), opacity: isGlobal ? 0.65 : 1,
+                                background: isCV ? "rgba(139,92,246,0.04)" : undefined }}
+                                title={cellTitle}>
+                                {v < 0 ? <span style={{ color: "var(--text-3)" }}>—</span> : (
+                                  <span>
+                                    {`${(v * 100).toFixed(1)}%`}
+                                    {std != null && <span style={{ fontSize: "0.65rem", color: "var(--text-3)", marginLeft: 2 }}>±{(std * 100).toFixed(1)}</span>}
+                                    {isGlobal && <span style={{ color: "var(--text-3)" }}>*</span>}
+                                    {hasOptuna && isCV && <span title="Optuna" style={{ marginLeft: 3, fontSize: "0.6rem", color: "#7c3aed" }}>⚡</span>}
+                                  </span>
+                                )}
                               </td>
                             );
                           })}
@@ -2071,11 +2108,11 @@ async function notifyFirstEmail() {
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead>
                         <tr>
-                          <th style={{ ...thS, textAlign: "left" }}>Model</th>
-                          <th style={{ ...thS, textAlign: "right" }}>Accuracy</th>
-                          <th style={{ ...thS, textAlign: "right" }}>Precision</th>
-                          <th style={{ ...thS, textAlign: "right" }}>Recall</th>
-                          <th style={{ ...thS, textAlign: "right" }}>F1</th>
+                          <th style={{ ...thS, textAlign: "left" }} data-tip="Nazwa modelu ML testowanego w walk-forward." data-tip-side="bottom">Model</th>
+                          <th style={{ ...thS, textAlign: "right" }} data-tip="Accuracy — % poprawnych predykcji (TP+TN)/(całość). Powyżej 55% to dobry wynik dla rynków." data-tip-side="bottom" title="Accuracy — % poprawnych predykcji">Accuracy ⓘ</th>
+                          <th style={{ ...thS, textAlign: "right" }} data-tip="Precision — % predykcji UP które naprawdę były wzrostami. Wysoka = mało fałszywych sygnałów." data-tip-side="bottom" title="Precision">Precision ⓘ</th>
+                          <th style={{ ...thS, textAlign: "right" }} data-tip="Recall — % faktycznych wzrostów które model wykrył. Wysoki = mało pominiętych okazji." data-tip-side="bottom" title="Recall">Recall ⓘ</th>
+                          <th style={{ ...thS, textAlign: "right" }} data-tip="F1-score — średnia harmoniczna Precision i Recall. Balansuje oba. >0.50 = dobry model." data-tip-side="bottom" title="F1-score">F1 ⓘ</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2487,8 +2524,16 @@ async function notifyFirstEmail() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                      {["Data", "Symbol", "Spółka", "EPS (est.)", "Kwartał"].map(h => (
-                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      {([
+                        ["Data",       "Planowana data publikacji raportu kwartalnego."],
+                        ["Symbol",     "Ticker giełdowy spółki. Kliknij wiersz aby przejść do analizy."],
+                        ["Spółka",     "Pełna nazwa spółki."],
+                        ["EPS (est.)", "Oczekiwany zysk na akcję (Earnings Per Share) wg konsensusu analityków przed raportem."],
+                        ["Kwartał",    "Okres fiskalny którego dotyczy raport, np. 2025Q1 = styczeń–marzec 2025."],
+                      ] as [string,string][]).map(([h, tip]) => (
+                        <th key={h} data-tip={tip} data-tip-side="bottom" style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)", cursor: "help", whiteSpace: "nowrap" }}>
+                          {h} <span style={{ opacity: 0.45, fontSize: "0.6rem" }}>ⓘ</span>
+                        </th>
                       ))}
                     </tr>
                   </thead>
@@ -2519,8 +2564,18 @@ async function notifyFirstEmail() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                      {["Data", "Symbol", "Spółka", "EPS est.", "EPS aktual.", "Niespodzianka", "Kwartał"].map(h => (
-                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      {([
+                        ["Data",          "Data opublikowania raportu kwartalnego."],
+                        ["Symbol",        "Ticker giełdowy spółki. Kliknij wiersz aby przejść do analizy."],
+                        ["Spółka",        "Pełna nazwa spółki."],
+                        ["EPS est.",      "Prognoza zysku na akcję wg konsensusu analityków przed raportem."],
+                        ["EPS aktual.",   "Rzeczywisty zysk na akcję opublikowany w raporcie."],
+                        ["Niespodzianka", "BEAT = wyniki powyżej oczekiwań (zielony), MISS = poniżej (czerwony), MEET = zgodnie z prognozą (pomarańczowy). Liczba % to odchylenie: (aktual−est)/|est|×100."],
+                        ["Kwartał",       "Okres fiskalny którego dotyczy raport."],
+                      ] as [string,string][]).map(([h, tip]) => (
+                        <th key={h} data-tip={tip} data-tip-side="bottom" style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)", cursor: "help", whiteSpace: "nowrap" }}>
+                          {h} <span style={{ opacity: 0.45, fontSize: "0.6rem" }}>ⓘ</span>
+                        </th>
                       ))}
                     </tr>
                   </thead>
@@ -2552,8 +2607,17 @@ async function notifyFirstEmail() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                      {["Kwartał", "Data", "EPS est.", "EPS aktual.", "Niespodzianka", "Status"].map(h => (
-                        <th key={h} style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)" }}>{h}</th>
+                      {([
+                        ["Kwartał",       "Okres fiskalny raportu, np. 2025Q1 = styczeń–marzec 2025."],
+                        ["Data",          "Data opublikowania lub planowana data raportu."],
+                        ["EPS est.",      "Prognoza zysku na akcję wg analityków przed raportem."],
+                        ["EPS aktual.",   "Rzeczywisty EPS z raportu. Pogrubiony gdy dostępny."],
+                        ["Niespodzianka", "BEAT/MISS/MEET i % odchylenia od prognozy. Brak gdy raport jeszcze nie opublikowany."],
+                        ["Status",        "Czy raport został już opublikowany (✓ opublikowany) czy jest jeszcze przed nami (oczekiwany)."],
+                      ] as [string,string][]).map(([h, tip]) => (
+                        <th key={h} data-tip={tip} data-tip-side="bottom" style={{ padding: "0.3rem 0.5rem", textAlign: "left", fontSize: "0.72rem", color: "var(--text-2)", cursor: "help", whiteSpace: "nowrap" }}>
+                          {h} <span style={{ opacity: 0.45, fontSize: "0.6rem" }}>ⓘ</span>
+                        </th>
                       ))}
                     </tr>
                   </thead>

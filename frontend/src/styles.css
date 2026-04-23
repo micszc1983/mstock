@@ -102,9 +102,9 @@ a { color: var(--accent); }
 /* ── Layout ────────────────────────────────────────────────────── */
 .app-shell {
   min-height: 100vh;
-  padding: 72px 16px 32px;
+  padding: 72px 20px 32px;
 }
-.container { max-width: 1600px; margin: 0 auto; }
+.container { width: 100%; margin: 0 auto; }
 
 /* ── Grids ─────────────────────────────────────────────────────── */
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
