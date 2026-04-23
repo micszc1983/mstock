@@ -24,6 +24,7 @@ from app.api.routes.data_quality import router as data_quality_router
 from app.api.routes.ensemble import router as ensemble_router
 from app.api.routes.recommendations import router as recommendations_router
 from app.api.routes.earnings import router as earnings_router
+from app.api.routes.insider import router as insider_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.repositories.assets import list_assets
@@ -123,6 +124,45 @@ async def lifespan(app: FastAPI):
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_asset_id ON earnings_call_analyses(asset_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_earnings_id ON earnings_call_analyses(earnings_id)"))
             print("[startup] migracja: tabela earnings_call_analyses gotowa")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS insider_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
+                    transaction_date DATE NOT NULL,
+                    filing_date DATE,
+                    name VARCHAR(200) NOT NULL,
+                    transaction_code VARCHAR(4) NOT NULL,
+                    transaction_type VARCHAR(20) NOT NULL,
+                    shares FLOAT,
+                    price FLOAT,
+                    value FLOAT,
+                    source VARCHAR(20) NOT NULL DEFAULT 'finnhub',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_insider_trades_asset_id ON insider_trades(asset_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_insider_trades_tx_date ON insider_trades(transaction_date)"))
+            print("[startup] migracja: tabela insider_trades gotowa")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS short_interest (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
+                    report_date DATE NOT NULL,
+                    shares_short FLOAT,
+                    short_percent_float FLOAT,
+                    short_ratio FLOAT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_short_interest_asset_id ON short_interest(asset_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_short_interest_report_date ON short_interest(report_date)"))
+            print("[startup] migracja: tabela short_interest gotowa")
         except Exception:
             pass
 
@@ -255,6 +295,7 @@ app.include_router(data_quality_router)
 app.include_router(ensemble_router)
 app.include_router(recommendations_router)
 app.include_router(earnings_router)
+app.include_router(insider_router)
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,8 @@ import type {
   EarningsCalendarResponse,
   EarningsRecord,
   EarningsCallAnalysis,
+  InsiderTrade,
+  ShortInterest,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -391,4 +393,18 @@ export const api = {
 
   ensembleWeights: (assetId: string) =>
     fetchJson<DynamicWeightInfo>(`${_activeBase}/assets/${assetId}/ensemble/weights`),
+
+  insiderTrades: (assetId: string, limit = 20) =>
+    fetchJson<InsiderTrade[]>(`${_activeBase}/assets/${assetId}/insider-trades?limit=${limit}`),
+
+  shortInterest: (assetId: string, limit = 6) =>
+    fetchJson<ShortInterest[]>(`${_activeBase}/assets/${assetId}/short-interest?limit=${limit}`),
+
+  syncInsiderAsset: (assetId: string) =>
+    postJson<{ asset_id: string; insider_trades: number; short_interest: number }>(
+      `${_activeBase}/assets/${assetId}/sync/insider`
+    ),
+
+  syncInsiderAll: () =>
+    postJson<{ started: boolean; message: string }>(`${_activeBase}/sync/insider`),
 };

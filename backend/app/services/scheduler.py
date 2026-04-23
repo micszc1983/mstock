@@ -319,6 +319,17 @@ def run_periodic_sync() -> None:
             except Exception as exc:
                 r.err("sync_earnings", exc)
 
+            # ── Insider trades + short interest (raz na cykl) ─────────────
+            try:
+                from app.services.insider_service import sync_all_insider_data
+                insider_results = sync_all_insider_data(db)
+                total_trades = sum(v.get("insider_trades", 0) for v in insider_results.values())
+                total_si = sum(v.get("short_interest", 0) for v in insider_results.values())
+                if total_trades or total_si:
+                    r.log(f"Insider data synced: {total_trades} trades, {total_si} short interest records")
+            except Exception as exc:
+                r.err("sync_insider", exc)
+
             # ── Global steps ───────────────────────────────────────────────
             print("[scheduler] → ML pipeline")
             _step_ml_dataset(db, r)

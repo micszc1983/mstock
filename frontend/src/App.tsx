@@ -50,6 +50,8 @@ import type {
   EarningsRecord,
   EarningsCallAnalysis,
   DynamicWeightInfo,
+  InsiderTrade,
+  ShortInterest,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -97,7 +99,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -147,6 +149,9 @@ export default function App() {
   const [assetEarnings, setAssetEarnings] = useState<EarningsRecord[]>([]);
   const [earningsAnalyses, setEarningsAnalyses] = useState<EarningsCallAnalysis[]>([]);
   const [llmAnalyzeLoading, setLlmAnalyzeLoading] = useState(false);
+  const [insiderTrades, setInsiderTrades] = useState<InsiderTrade[]>([]);
+  const [shortInterest, setShortInterest] = useState<ShortInterest[]>([]);
+  const [syncingInsider, setSyncingInsider] = useState(false);
   const [ensembleMode, setEnsembleMode] = useState<string>("ensemble_weighted");
   const [showAddAsset, setShowAddAsset] = useState(false);
   const [newAsset, setNewAsset] = useState<AssetCreate>({
@@ -303,6 +308,8 @@ export default function App() {
         currentAssetEarnings,
         currentEarningsAnalyses,
         currentEnsembleDynWeights,
+        currentInsiderTrades,
+        currentShortInterest,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -321,6 +328,8 @@ export default function App() {
         api.assetEarnings(selectedAsset).catch(() => []),
         api.earningsAnalyses(selectedAsset).catch(() => []),
         api.ensembleWeights(selectedAsset).catch(() => null),
+        api.insiderTrades(selectedAsset).catch(() => []),
+        api.shortInterest(selectedAsset).catch(() => []),
       ]);
 
       setEvents(notificationEvents);
@@ -337,6 +346,8 @@ export default function App() {
       setAssetEarnings(currentAssetEarnings);
       setEarningsAnalyses(currentEarningsAnalyses);
       setEnsembleDynWeights(currentEnsembleDynWeights);
+      setInsiderTrades(currentInsiderTrades);
+      setShortInterest(currentShortInterest);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -749,7 +760,7 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["portfolio", "Portfel"], ["earnings", "Wyniki spółek"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -2762,6 +2773,162 @@ async function notifyFirstEmail() {
             )}
           </Section>
         </>);
+      })()}
+
+      {/* ── Zakładka Insider & Short ──────────────────────────────────────── */}
+      {activeTab === "insider" && (() => {
+        const latestSI = shortInterest[0] ?? null;
+        const syncInsider = async () => {
+          setSyncingInsider(true);
+          try {
+            const res = await api.syncInsiderAsset(selectedAsset);
+            setInfo(`Zsynchronizowano: ${res.insider_trades} transakcji, ${res.short_interest} short interest`);
+            const [trades, si] = await Promise.all([
+              api.insiderTrades(selectedAsset).catch(() => []),
+              api.shortInterest(selectedAsset).catch(() => []),
+            ]);
+            setInsiderTrades(trades);
+            setShortInterest(si);
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          } finally {
+            setSyncingInsider(false);
+          }
+        };
+
+        const buySellColor = (t: InsiderTrade) =>
+          t.transaction_type === "buy" ? "#16a34a" : t.transaction_type === "sell" ? "#dc2626" : "var(--text-2)";
+
+        return (
+          <>
+            {/* Header toolbar */}
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 700, fontSize: "1rem" }}>Insider Trades &amp; Short Interest</span>
+              <button
+                onClick={syncInsider}
+                disabled={syncingInsider}
+                style={{ padding: "4px 14px", borderRadius: 6, border: "1px solid var(--border)", background: syncingInsider ? "var(--surface)" : "var(--accent)", color: syncingInsider ? "var(--text-3)" : "#fff", cursor: syncingInsider ? "not-allowed" : "pointer", fontSize: "0.8rem" }}
+              >
+                {syncingInsider ? "Sync…" : "Synchronizuj"}
+              </button>
+              <span style={{ fontSize: "0.75rem", color: "var(--text-3)" }}>Źródło: Finnhub (insider) + yfinance (short interest)</span>
+            </div>
+
+            {/* Short Interest panel */}
+            <Section title="Short Interest" subtitle="Liczba akcji sprzedanych krótko (short selling). Wysoki short % może sygnalizować presję niedźwiedzi lub potencjalny short squeeze.">
+              {latestSI === null ? (
+                <div style={{ color: "var(--text-3)", fontSize: "0.85rem", padding: "1rem 0" }}>
+                  Brak danych short interest. Kliknij "Synchronizuj" aby pobrać.
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+                  <div style={{ textAlign: "center", minWidth: 120 }}>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>Short % Float</div>
+                    <div style={{ fontSize: "1.5rem", fontWeight: 700, color: (latestSI.short_percent_float ?? 0) > 0.1 ? "#dc2626" : "var(--text)" }}>
+                      {latestSI.short_percent_float != null ? `${(latestSI.short_percent_float * 100).toFixed(1)}%` : "—"}
+                    </div>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)" }}>wg float</div>
+                  </div>
+                  <div style={{ textAlign: "center", minWidth: 120 }}>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>Short Ratio</div>
+                    <div style={{ fontSize: "1.5rem", fontWeight: 700, color: (latestSI.short_ratio ?? 0) > 5 ? "#f59e0b" : "var(--text)" }}>
+                      {latestSI.short_ratio != null ? latestSI.short_ratio.toFixed(1) : "—"}
+                    </div>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)" }}>dni do pokrycia</div>
+                  </div>
+                  <div style={{ textAlign: "center", minWidth: 120 }}>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>Akcji short</div>
+                    <div style={{ fontSize: "1.5rem", fontWeight: 700 }}>
+                      {latestSI.shares_short != null ? (latestSI.shares_short >= 1e6 ? `${(latestSI.shares_short / 1e6).toFixed(1)}M` : latestSI.shares_short.toLocaleString()) : "—"}
+                    </div>
+                    <div style={{ fontSize: "0.68rem", color: "var(--text-3)" }}>stan na {latestSI.report_date}</div>
+                  </div>
+                </div>
+              )}
+              {shortInterest.length > 1 && (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                  <thead>
+                    <tr style={{ background: "var(--surface)" }}>
+                      {[["Data", "Data raportu"], ["Short %", "% akcji w free float sprzedanych krótko"], ["Short Ratio", "Liczba dni potrzebnych do pokrycia pozycji krótkich przy średnim wolumenie"], ["Akcji short", "Łączna liczba akcji sprzedanych krótko"]].map(([h, tip]) => (
+                        <th key={h} data-tip={tip} data-tip-side="bottom" style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, cursor: "help" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shortInterest.map((si) => (
+                      <tr key={si.id} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "4px 8px" }}>{si.report_date}</td>
+                        <td style={{ padding: "4px 8px", color: (si.short_percent_float ?? 0) > 0.1 ? "#dc2626" : "var(--text)" }}>
+                          {si.short_percent_float != null ? `${(si.short_percent_float * 100).toFixed(1)}%` : "—"}
+                        </td>
+                        <td style={{ padding: "4px 8px", color: (si.short_ratio ?? 0) > 5 ? "#f59e0b" : "var(--text)" }}>
+                          {si.short_ratio != null ? si.short_ratio.toFixed(1) : "—"}
+                        </td>
+                        <td style={{ padding: "4px 8px" }}>
+                          {si.shares_short != null ? (si.shares_short >= 1e6 ? `${(si.shares_short / 1e6).toFixed(1)}M` : si.shares_short.toLocaleString()) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Section>
+
+            {/* Insider Trades panel */}
+            <Section title="Transakcje insiderów" subtitle="Transakcje akcjami spółki przez osoby posiadające dostęp do informacji poufnych (zarząd, rada nadzorcza). Zakupy mogą sygnalizować przekonanie o niedowartościowaniu, sprzedaże — realizację zysku lub potrzebę gotówki.">
+              {insiderTrades.length === 0 ? (
+                <div style={{ color: "var(--text-3)", fontSize: "0.85rem", padding: "1rem 0" }}>
+                  Brak danych insider transactions. Kliknij "Synchronizuj" aby pobrać z Finnhub.
+                </div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                  <thead>
+                    <tr style={{ background: "var(--surface)" }}>
+                      {[
+                        ["Data", "Data transakcji"],
+                        ["Osoba", "Imię i nazwisko insiders"],
+                        ["Typ", "Kod i typ transakcji (P=kupno, S=sprzedaż, M=konwersja opcji)"],
+                        ["Akcji", "Liczba akcji objętych transakcją"],
+                        ["Cena", "Cena wykonania transakcji"],
+                        ["Wartość", "Szacowana wartość transakcji (akcji × cena)"],
+                        ["Data zgł.", "Data złożenia raportu do regulatora (SEC Form 4)"],
+                      ].map(([h, tip]) => (
+                        <th key={h} data-tip={tip} data-tip-side="bottom" style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, cursor: "help" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {insiderTrades.map((t) => (
+                      <tr key={t.id} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>{t.transaction_date}</td>
+                        <td style={{ padding: "4px 8px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={t.name}>{t.name}</td>
+                        <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>
+                          <span style={{
+                            padding: "2px 7px", borderRadius: 4, fontSize: "0.72rem", fontWeight: 600,
+                            background: t.transaction_type === "buy" ? "rgba(22,163,74,0.12)" : t.transaction_type === "sell" ? "rgba(220,38,38,0.1)" : "var(--surface)",
+                            color: buySellColor(t),
+                          }}>
+                            {t.transaction_code} · {t.transaction_type === "buy" ? "Kupno" : t.transaction_type === "sell" ? "Sprzedaż" : "Inne"}
+                          </span>
+                        </td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", color: buySellColor(t) }}>
+                          {t.shares != null ? (t.shares >= 1e6 ? `${(t.shares / 1e6).toFixed(2)}M` : t.shares.toLocaleString()) : "—"}
+                        </td>
+                        <td style={{ padding: "4px 8px", textAlign: "right" }}>
+                          {t.price != null ? `$${t.price.toFixed(2)}` : "—"}
+                        </td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 500, color: buySellColor(t) }}>
+                          {t.value != null ? (Math.abs(t.value) >= 1e6 ? `$${(t.value / 1e6).toFixed(2)}M` : `$${Math.abs(t.value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`) : "—"}
+                        </td>
+                        <td style={{ padding: "4px 8px", whiteSpace: "nowrap", color: "var(--text-3)" }}>{t.filing_date ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Section>
+          </>
+        );
       })()}
 
     </PageContainer>

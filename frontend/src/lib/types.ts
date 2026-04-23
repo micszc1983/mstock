@@ -493,3 +493,28 @@ export type PriceBar = {
   close: number;
   volume: number;
 };
+
+export type InsiderTrade = {
+  id: number;
+  asset_id: string;
+  transaction_date: string;
+  filing_date: string | null;
+  name: string;
+  transaction_code: string;
+  transaction_type: "buy" | "sell" | "other";
+  shares: number | null;
+  price: number | null;
+  value: number | null;
+  source: string;
+  created_at: string;
+};
+
+export type ShortInterest = {
+  id: number;
+  asset_id: string;
+  report_date: string;
+  shares_short: number | null;
+  short_percent_float: number | null;
+  short_ratio: number | null;
+  created_at: string;
+};

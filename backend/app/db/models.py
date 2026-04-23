@@ -415,6 +415,35 @@ class EarningsORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
 
 
+class InsiderTradeORM(Base):
+    __tablename__ = "insider_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    transaction_date: Mapped[date] = mapped_column(Date, index=True)
+    filing_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
+    transaction_code: Mapped[str] = mapped_column(String(4))      # P=buy S=sell M=exercise etc.
+    transaction_type: Mapped[str] = mapped_column(String(20))     # buy|sell|other
+    shares: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="finnhub")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+
+
+class ShortInterestORM(Base):
+    __tablename__ = "short_interest"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    shares_short: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    short_percent_float: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    short_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+
+
 class EarningsCallAnalysisORM(Base):
     __tablename__ = "earnings_call_analyses"
 
