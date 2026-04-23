@@ -413,3 +413,22 @@ class EarningsORM(Base):
     is_upcoming: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+
+
+class EarningsCallAnalysisORM(Base):
+    __tablename__ = "earnings_call_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    earnings_id: Mapped[int] = mapped_column(ForeignKey("earnings.id"), unique=True, index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    tone_score: Mapped[int] = mapped_column(Integer)            # 1–5 (1=bardzo niedźwiedzi, 5=bardzo bycze)
+    guidance_change: Mapped[str] = mapped_column(String(16))    # raised/lowered/maintained/none
+    key_themes_json: Mapped[str] = mapped_column(Text)          # JSON list[str]
+    risk_factors_json: Mapped[str] = mapped_column(Text)        # JSON list[str]
+    key_quote: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    llm_sentiment_score: Mapped[float] = mapped_column(Float)   # -100 do +100
+    summary: Mapped[str] = mapped_column(Text)
+    model_used: Mapped[str] = mapped_column(String(64))
+    news_articles_used: Mapped[int] = mapped_column(Integer, default=0)
+    raw_response: Mapped[str] = mapped_column(Text)

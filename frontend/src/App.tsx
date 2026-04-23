@@ -48,6 +48,7 @@ import type {
   MLModelComparison,
   EarningsCalendarResponse,
   EarningsRecord,
+  EarningsCallAnalysis,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -142,6 +143,8 @@ export default function App() {
   const [ensembleLeaderboard, setEnsembleLeaderboard] = useState<EnsembleLeaderboard[]>([]);
   const [earningsCalendar, setEarningsCalendar] = useState<EarningsCalendarResponse>({ upcoming: [], recent: [] });
   const [assetEarnings, setAssetEarnings] = useState<EarningsRecord[]>([]);
+  const [earningsAnalyses, setEarningsAnalyses] = useState<EarningsCallAnalysis[]>([]);
+  const [llmAnalyzeLoading, setLlmAnalyzeLoading] = useState(false);
   const [ensembleMode, setEnsembleMode] = useState<string>("ensemble_weighted");
   const [showAddAsset, setShowAddAsset] = useState(false);
   const [newAsset, setNewAsset] = useState<AssetCreate>({
@@ -295,6 +298,7 @@ export default function App() {
         currentEnsembleLeaderboard,
         currentEarningsCalendar,
         currentAssetEarnings,
+        currentEarningsAnalyses,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -311,6 +315,7 @@ export default function App() {
         api.ensembleLeaderboard().catch(() => []),
         api.earningsCalendar().catch(() => ({ upcoming: [], recent: [] })),
         api.assetEarnings(selectedAsset).catch(() => []),
+        api.earningsAnalyses(selectedAsset).catch(() => []),
       ]);
 
       setEvents(notificationEvents);
@@ -325,6 +330,7 @@ export default function App() {
       setEnsembleLeaderboard(currentEnsembleLeaderboard);
       setEarningsCalendar(currentEarningsCalendar);
       setAssetEarnings(currentAssetEarnings);
+      setEarningsAnalyses(currentEarningsAnalyses);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -2543,6 +2549,126 @@ async function notifyFirstEmail() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </Section>
+
+          {/* ── Analiza LLM wyników kwartalnych ── */}
+          <Section title="Analiza AI wyników kwartalnych"
+            subtitle="Claude analizuje newsy z okolicy raportu i ocenia ton zarządu, kierunek prognoz i kluczowe tematy.">
+            <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", marginBottom: "0.8rem", flexWrap: "wrap" }}>
+              <button
+                disabled={llmAnalyzeLoading}
+                style={{ padding: "0.3rem 0.8rem", borderRadius: 6, border: "1px solid var(--border)", cursor: llmAnalyzeLoading ? "not-allowed" : "pointer", fontSize: "0.78rem", opacity: llmAnalyzeLoading ? 0.6 : 1 }}
+                onClick={async () => {
+                  setLlmAnalyzeLoading(true);
+                  try {
+                    const result = await api.analyzeLatestEarnings(selectedAsset);
+                    setEarningsAnalyses(prev => {
+                      const without = prev.filter(a => a.earnings_id !== result.earnings_id);
+                      return [result, ...without];
+                    });
+                  } catch (e) {
+                    setError("Analiza LLM niedostępna. Sprawdź klucz ANTHROPIC_API_KEY w .env.");
+                  } finally {
+                    setLlmAnalyzeLoading(false);
+                  }
+                }}>
+                {llmAnalyzeLoading ? "Analizuję..." : "Analizuj AI (najnowsze)"}
+              </button>
+              <span style={{ fontSize: "0.72rem", color: "var(--text-3)" }}>
+                Wymaga klucza ANTHROPIC_API_KEY i newsów w bazie.
+              </span>
+            </div>
+            {earningsAnalyses.length === 0 ? (
+              <p style={{ color: "var(--text-3)", fontSize: "0.82rem" }}>
+                Brak analiz AI dla tego aktywa. Kliknij "Analizuj AI" powyżej.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                {earningsAnalyses.map((a) => {
+                  const sentColor = a.llm_sentiment_score > 20 ? "#16a34a" : a.llm_sentiment_score < -20 ? "#dc2626" : "var(--text-2)";
+                  const toneLabels = ["", "Bardzo niedźwiedzi", "Niedźwiedzi", "Neutralny", "Bycze", "Bardzo bycze"];
+                  const guidanceColors: Record<string, string> = {
+                    raised: "#16a34a", lowered: "#dc2626", maintained: "var(--text-2)", none: "var(--text-3)"
+                  };
+                  const guidanceLabels: Record<string, string> = {
+                    raised: "Prognozy podniesione", lowered: "Prognozy obniżone",
+                    maintained: "Prognozy bez zmian", none: "Brak prognoz"
+                  };
+                  return (
+                    <div key={a.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "0.9rem 1.1rem", background: "var(--bg-subtle)" }}>
+                      <div style={{ display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap", marginBottom: "0.6rem" }}>
+                        <span style={{ fontWeight: 700, fontSize: "0.9rem" }}>
+                          {assets.find(asset => asset.id === a.asset_id)?.name ?? a.asset_id}
+                        </span>
+                        <span style={{ fontSize: "0.72rem", color: "var(--text-3)" }}>
+                          Analiza: {new Date(a.analyzed_at).toLocaleDateString("pl-PL")}
+                        </span>
+                        <span style={{ fontSize: "0.72rem", color: "var(--text-3)" }}>
+                          Newsy: {a.news_articles_used}
+                        </span>
+                        <span style={{ fontSize: "0.72rem", padding: "0.1rem 0.4rem", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-3)" }}>
+                          {a.model_used}
+                        </span>
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "0.6rem", marginBottom: "0.7rem" }}>
+                        <div style={{ background: "var(--bg)", borderRadius: 6, padding: "0.5rem 0.7rem" }}>
+                          <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.15rem" }}>Ton zarządu</div>
+                          <div style={{ fontWeight: 700 }}>{"★".repeat(a.tone_score)}{"☆".repeat(5 - a.tone_score)}</div>
+                          <div style={{ fontSize: "0.72rem", color: "var(--text-2)" }}>{toneLabels[a.tone_score] ?? ""}</div>
+                        </div>
+                        <div style={{ background: "var(--bg)", borderRadius: 6, padding: "0.5rem 0.7rem" }}>
+                          <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.15rem" }}>Kierunek prognoz</div>
+                          <div style={{ fontWeight: 700, color: guidanceColors[a.guidance_change] ?? "var(--text)" }}>
+                            {guidanceLabels[a.guidance_change] ?? a.guidance_change}
+                          </div>
+                        </div>
+                        <div style={{ background: "var(--bg)", borderRadius: 6, padding: "0.5rem 0.7rem" }}>
+                          <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.15rem" }}>Sentyment AI</div>
+                          <div style={{ fontWeight: 700, fontSize: "1.1rem", color: sentColor }}>
+                            {a.llm_sentiment_score > 0 ? "+" : ""}{a.llm_sentiment_score.toFixed(1)}
+                          </div>
+                          <div style={{ fontSize: "0.68rem", color: "var(--text-3)" }}>zakres -100 do +100</div>
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: "0.8rem", color: "var(--text)", lineHeight: 1.5, marginBottom: "0.6rem" }}>
+                        {a.summary}
+                      </div>
+
+                      {a.key_quote && (
+                        <div style={{ borderLeft: "3px solid var(--accent)", paddingLeft: "0.6rem", marginBottom: "0.6rem", fontSize: "0.78rem", color: "var(--text-2)", fontStyle: "italic" }}>
+                          {a.key_quote}
+                        </div>
+                      )}
+
+                      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                        {a.key_themes.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.25rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Kluczowe tematy</div>
+                            <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                              {a.key_themes.map((t, i) => (
+                                <span key={i} style={{ padding: "0.1rem 0.45rem", borderRadius: 4, background: "rgba(99,102,241,0.1)", color: "#6366f1", fontSize: "0.72rem" }}>{t}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {a.risk_factors.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.25rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Czynniki ryzyka</div>
+                            <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                              {a.risk_factors.map((r, i) => (
+                                <span key={i} style={{ padding: "0.1rem 0.45rem", borderRadius: 4, background: "rgba(220,38,38,0.08)", color: "#dc2626", fontSize: "0.72rem" }}>{r}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </Section>

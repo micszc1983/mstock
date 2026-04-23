@@ -16,6 +16,7 @@ try:
         massive_api_key: str = ""
         twelvedata_api_key: str = ""
         rapidapi_api_key: str = ""
+        anthropic_api_key: str = ""
         sync_timeout_seconds: float = 20.0
         auto_sync_enabled: bool = True
         auto_sync_interval_minutes: int = 60
@@ -70,6 +71,7 @@ except ImportError:
         massive_api_key: str = os.getenv("MASSIVE_API_KEY", "")
         twelvedata_api_key: str = os.getenv("TWELVEDATA_API_KEY", "")
         rapidapi_api_key: str = os.getenv("RAPIDAPI_API_KEY", "")
+        anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         sync_timeout_seconds: float = float(os.getenv("SYNC_TIMEOUT_SECONDS", "20"))
         auto_sync_enabled: bool = os.getenv("AUTO_SYNC_ENABLED", "true").lower() == "true"
         auto_sync_interval_minutes: int = int(os.getenv("AUTO_SYNC_INTERVAL_MINUTES", "60"))

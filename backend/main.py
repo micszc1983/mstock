@@ -101,6 +101,30 @@ async def lifespan(app: FastAPI):
             print("[startup] migracja: tabela earnings gotowa")
         except Exception:
             pass
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS earnings_call_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    earnings_id INTEGER NOT NULL UNIQUE REFERENCES earnings(id),
+                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
+                    analyzed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    tone_score INTEGER NOT NULL DEFAULT 3,
+                    guidance_change VARCHAR(16) NOT NULL DEFAULT 'none',
+                    key_themes_json TEXT NOT NULL DEFAULT '[]',
+                    risk_factors_json TEXT NOT NULL DEFAULT '[]',
+                    key_quote TEXT,
+                    llm_sentiment_score FLOAT NOT NULL DEFAULT 0.0,
+                    summary TEXT NOT NULL DEFAULT '',
+                    model_used VARCHAR(64) NOT NULL DEFAULT '',
+                    news_articles_used INTEGER NOT NULL DEFAULT 0,
+                    raw_response TEXT NOT NULL DEFAULT ''
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_asset_id ON earnings_call_analyses(asset_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_earnings_id ON earnings_call_analyses(earnings_id)"))
+            print("[startup] migracja: tabela earnings_call_analyses gotowa")
+        except Exception:
+            pass
 
     print("[startup] tabele DB gotowe")
 

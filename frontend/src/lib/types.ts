@@ -408,6 +408,22 @@ export type EarningsCalendarResponse = {
   recent: EarningsCalendarEntry[];
 };
 
+export type EarningsCallAnalysis = {
+  id: number;
+  earnings_id: number;
+  asset_id: string;
+  analyzed_at: string;
+  tone_score: number;            // 1–5
+  guidance_change: string;       // raised | lowered | maintained | none
+  key_themes: string[];
+  risk_factors: string[];
+  key_quote: string | null;
+  llm_sentiment_score: number;   // -100 do +100
+  summary: string;
+  model_used: string;
+  news_articles_used: number;
+};
+
 export type PriceQuality    = { total_points: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; gap_count: number; gap_pct: number; score: number; };
 export type NewsQuality     = { total_items: number; items_7d: number; items_30d: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; nlp_enriched: number; nlp_coverage_pct: number; score: number; };
 export type FeatureQuality  = { has_snapshot: boolean; staleness_hours: number | null; is_stale: boolean; scores_nonzero: boolean; has_all_forecasts: boolean; has_decision_snapshot: boolean; score: number; };

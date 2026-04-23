@@ -100,6 +100,13 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     except Exception:
         earnings_surprise_pct = None
 
+    # ── LLM sentiment z analizy wynikowej ─────────────────────────────────
+    try:
+        from app.repositories.earnings_analysis import get_latest_llm_sentiment
+        llm_earnings_sentiment = get_latest_llm_sentiment(db, asset_id, max_days=90)
+    except Exception:
+        llm_earnings_sentiment = None
+
     # ══════════════════════════════════════════════════════════════════════
     # COMPOSITE SCORE — ważona suma znormalizowanych sygnałów
     # Każdy sygnał → wkład w [-1, +1], potem suma × wagi → [−100, +100]
@@ -197,6 +204,12 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     if earnings_surprise_pct is not None:
         add("Zaskoczenie EPS", earnings_surprise_pct,
             _norm(earnings_surprise_pct, 0.0, 15.0), 0.07)
+
+    # 17. LLM sentyment z analizy wynikowej — ocena tonu zarządu i newsów
+    #     Centrum 0, skala 60; wartości ±60 = silny sygnał
+    if llm_earnings_sentiment is not None:
+        add("LLM: ton wyników", llm_earnings_sentiment,
+            _norm(llm_earnings_sentiment, 0.0, 60.0), 0.06)
 
     # ── Oblicz composite score ──────────────────────────────────────────
     total_weight = sum(w for _, _, _, w in contributions)

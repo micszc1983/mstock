@@ -34,6 +34,7 @@ import type {
   Watchlist,
   EarningsCalendarResponse,
   EarningsRecord,
+  EarningsCallAnalysis,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -376,4 +377,10 @@ export const api = {
 
   syncEarnings: () =>
     postJson<{ started: boolean; message: string }>(`${_activeBase}/sync/earnings`),
+
+  earningsAnalyses: (assetId: string, limit = 8) =>
+    fetchJson<EarningsCallAnalysis[]>(`${_activeBase}/assets/${assetId}/earnings/analyses?limit=${limit}`),
+
+  analyzeLatestEarnings: (assetId: string) =>
+    postJson<EarningsCallAnalysis>(`${_activeBase}/assets/${assetId}/earnings/latest/analyze`),
 };
