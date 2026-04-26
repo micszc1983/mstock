@@ -152,6 +152,7 @@ export default function App() {
   const [insiderTrades, setInsiderTrades] = useState<InsiderTrade[]>([]);
   const [shortInterest, setShortInterest] = useState<ShortInterest[]>([]);
   const [syncingInsider, setSyncingInsider] = useState(false);
+  const [portfolioPositions, setPortfolioPositions] = useState<{ asset_id: string; quantity: number; avg_buy_price: number | null }[]>([]);
   const [ensembleMode, setEnsembleMode] = useState<string>("ensemble_weighted");
   const [showAddAsset, setShowAddAsset] = useState(false);
   const [newAsset, setNewAsset] = useState<AssetCreate>({
@@ -252,6 +253,7 @@ export default function App() {
         currentPriceHistory,
         currentEnsembleSignal,
         notificationChannels,
+        currentPortfolioPositions,
       ] = await Promise.all([
         api.latestThesis(selectedAsset).catch(() => null),
         api.latestForecasts(selectedAsset).catch(() => []),
@@ -270,6 +272,7 @@ export default function App() {
         api.priceHistory(selectedAsset, 365).catch(() => []),
         api.ensembleSignal(selectedAsset, ensembleMode).catch(() => null),
         api.notificationChannels().catch(() => []),
+        api.portfolioPositions().catch(() => []),
       ]);
 
       setLatestThesis(thesis);
@@ -289,6 +292,7 @@ export default function App() {
       setPriceHistory(currentPriceHistory);
       setEnsembleSignal(currentEnsembleSignal);
       setChannels(notificationChannels);
+      setPortfolioPositions(currentPortfolioPositions);
       setLastRefreshedAt(new Date());
       setLoading(false);  // odblokuj UI — faza 2 idzie w tle
 
@@ -991,6 +995,159 @@ async function notifyFirstEmail() {
           icon={<Bell size={18} />}
         />
       </div>
+
+      {/* ── Panel "Co zrobić z tą pozycją?" ── */}
+      {(() => {
+        const rec = recommendations.find(r => r.asset_id === selectedAsset);
+        if (!rec) return null;
+
+        const myPos = portfolioPositions.find(p => p.asset_id === selectedAsset && p.quantity > 0) ?? null;
+        const isOwned = myPos !== null;
+
+        // ── Oblicz akcję ─────────────────────────────────────────────────────
+        const conviction = rec.conviction_score ?? 50;
+        const riskScore  = rec.risk_score ?? 50;
+        const reco       = rec.recommendation;        // KUP | SPRZEDAJ | TRZYMAJ
+        const ensDir     = ensembleSignal?.final_direction ?? null;
+        const ensConf    = ensembleSignal?.final_confidence ?? 0;
+
+        type ActionLevel = "strong_buy" | "buy" | "hold" | "reduce" | "exit" | "watch" | "skip";
+        let action: ActionLevel;
+        let actionLabel: string;
+        let actionColor: string;
+        let actionBg: string;
+        let headline: string;
+        let bullets: string[];
+
+        if (isOwned) {
+          // ── Tryb: posiadacz ────────────────────────────────────────────────
+          if (reco === "SPRZEDAJ" && conviction > 60) {
+            action = "exit"; actionLabel = "WYJDŹ Z POZYCJI";
+            actionColor = "#dc2626"; actionBg = "rgba(220,38,38,0.08)";
+            headline = "Sygnały wskazują na wyjście — rozważ sprzedaż";
+          } else if (reco === "SPRZEDAJ" || (reco === "TRZYMAJ" && riskScore > 65)) {
+            action = "reduce"; actionLabel = "ROZWAŻ REDUKCJĘ";
+            actionColor = "#f59e0b"; actionBg = "rgba(245,158,11,0.08)";
+            headline = "Podwyższone ryzyko — możliwa częściowa realizacja zysku";
+          } else if (reco === "KUP" && conviction > 65 && riskScore < 50) {
+            action = "strong_buy"; actionLabel = "ZWIĘKSZ POZYCJĘ";
+            actionColor = "#16a34a"; actionBg = "rgba(22,163,74,0.09)";
+            headline = "Silny sygnał — warunki sprzyjają doważeniu";
+          } else if (reco === "KUP") {
+            action = "buy"; actionLabel = "TRZYMAJ / ROZWAŻ DOWAŻENIE";
+            actionColor = "#22c55e"; actionBg = "rgba(34,197,94,0.08)";
+            headline = "Sygnał bycze — trzymaj i obserwuj";
+          } else {
+            action = "hold"; actionLabel = "TRZYMAJ";
+            actionColor = "#6366f1"; actionBg = "rgba(99,102,241,0.07)";
+            headline = "Brak silnego sygnału — trzymaj obecną pozycję";
+          }
+          bullets = [
+            myPos.avg_buy_price != null
+              ? `Twoja pozycja: ${myPos.quantity} szt. śr. po ${myPos.avg_buy_price.toFixed(2)} ${selectedMeta?.currency ?? ""}`
+              : `Twoja pozycja: ${myPos.quantity} szt.`,
+            `Rekomendacja systemu: ${reco} (conviction ${conviction.toFixed(0)}%, ryzyko ${riskScore.toFixed(0)}%)`,
+            ensDir ? `Sygnał ensemble: ${ensDir === "up" ? "▲ wzrostowy" : "▼ spadkowy"} (pewność ${(ensConf).toFixed(0)}%)` : "",
+            rec.forecast_dir_5d ? `Prognoza 5d: ${rec.forecast_dir_5d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
+            rec.forecast_dir_20d ? `Prognoza 20d: ${rec.forecast_dir_20d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
+          ].filter(Boolean);
+        } else {
+          // ── Tryb: obserwujący ─────────────────────────────────────────────
+          if (reco === "KUP" && conviction > 65 && riskScore < 45) {
+            action = "strong_buy"; actionLabel = "ROZWAŻ OTWARCIE POZYCJI";
+            actionColor = "#16a34a"; actionBg = "rgba(22,163,74,0.09)";
+            headline = "Silny sygnał wejścia — spójne potwierdzenie wielu wskaźników";
+          } else if (reco === "KUP") {
+            action = "buy"; actionLabel = "WEJŚCIE WARUNKOWE";
+            actionColor = "#22c55e"; actionBg = "rgba(34,197,94,0.08)";
+            headline = "Sygnał kupna, ale czekaj na dalsze potwierdzenie";
+          } else if (reco === "TRZYMAJ") {
+            action = "watch"; actionLabel = "OBSERWUJ";
+            actionColor = "#6366f1"; actionBg = "rgba(99,102,241,0.07)";
+            headline = "Sygnał neutralny — nie otwieraj pozycji bez wyraźnego katalizatora";
+          } else {
+            action = "skip"; actionLabel = "POMIŃ";
+            actionColor = "#ef4444"; actionBg = "rgba(239,68,68,0.07)";
+            headline = "Sygnał negatywny — nie otwieraj pozycji";
+          }
+          bullets = [
+            `Aktywo: ${selectedMeta?.symbol} — ${selectedMeta?.name ?? ""}`,
+            `Rekomendacja: ${reco} (conviction ${conviction.toFixed(0)}%, ryzyko ${riskScore.toFixed(0)}%)`,
+            ensDir ? `Sygnał ensemble: ${ensDir === "up" ? "▲ wzrostowy" : "▼ spadkowy"} (pewność ${(ensConf).toFixed(0)}%)` : "",
+            rec.forecast_dir_5d ? `Prognoza 5d: ${rec.forecast_dir_5d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
+            rec.forecast_dir_20d ? `Prognoza 20d: ${rec.forecast_dir_20d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
+          ].filter(Boolean);
+        }
+
+        // Kluczowe sygnały z top_signals (max 3)
+        const topSigs = (rec.top_signals ?? []).slice(0, 3);
+
+        // Warunki unieważnienia z tezy (max 2)
+        const invalidations = latestThesis?.invalidation_conditions?.slice(0, 2) ?? [];
+
+        return (
+          <div style={{
+            margin: "0 0 20px", padding: "1rem 1.2rem",
+            borderRadius: "10px", border: `1.5px solid ${actionColor}40`,
+            background: actionBg, position: "relative",
+          }}>
+            {/* Nagłówek */}
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
+              <span style={{
+                padding: "3px 12px", borderRadius: "6px", fontWeight: 700, fontSize: "0.8rem",
+                letterSpacing: "0.06em", background: `${actionColor}18`, color: actionColor,
+              }}>{actionLabel}</span>
+              <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--text)" }}>{headline}</span>
+              <span style={{
+                marginLeft: "auto", fontSize: "0.7rem", color: "var(--text-3)",
+                padding: "2px 8px", borderRadius: "4px", background: "var(--surface)",
+              }}>{isOwned ? "📂 Mam tę pozycję" : "👁 Obserwuję"}</span>
+            </div>
+
+            {/* Sygnały */}
+            <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginBottom: topSigs.length || invalidations.length ? "0.75rem" : 0 }}>
+              <div>
+                <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.3rem" }}>Kontekst</div>
+                <ul style={{ margin: 0, padding: "0 0 0 1rem", listStyle: "disc", fontSize: "0.8rem", color: "var(--text)", lineHeight: 1.7 }}>
+                  {bullets.map((b, i) => <li key={i}>{b}</li>)}
+                </ul>
+              </div>
+
+              {topSigs.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.3rem" }}>Kluczowe sygnały</div>
+                  <ul style={{ margin: 0, padding: "0 0 0 1rem", listStyle: "none", fontSize: "0.8rem", lineHeight: 1.7 }}>
+                    {topSigs.map((s, i) => (
+                      <li key={i} style={{ color: s.direction === "bullish" ? "#16a34a" : s.direction === "bearish" ? "#dc2626" : "var(--text-2)" }}>
+                        {s.direction === "bullish" ? "▲" : s.direction === "bearish" ? "▼" : "●"} {s.name}
+                        <span style={{ color: "var(--text-3)", fontSize: "0.72rem", marginLeft: "0.4rem" }}>
+                          ({s.normalized > 0 ? "+" : ""}{(s.normalized * 100).toFixed(0)}%)
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {invalidations.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "0.68rem", color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.3rem" }}>Kiedy zmienić zdanie</div>
+                  <ul style={{ margin: 0, padding: "0 0 0 1rem", listStyle: "disc", fontSize: "0.78rem", color: "var(--text-2)", lineHeight: 1.7 }}>
+                    {invalidations.map((c, i) => <li key={i}>{c}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {/* Stopka z rationale */}
+            {rec.rationale && (
+              <div style={{ fontSize: "0.75rem", color: "var(--text-2)", borderTop: "1px solid var(--border)", paddingTop: "0.5rem", lineHeight: 1.5 }}>
+                <strong>Uzasadnienie: </strong>{rec.rationale}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Historia ceny ── */}
       {selectedMeta && (

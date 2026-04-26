@@ -31,7 +31,7 @@ from app.repositories.ensemble import (
 from app.repositories.features import get_latest_feature_snapshot
 from app.repositories.forecasts import get_latest_forecasts
 from app.repositories.ml import get_active_model_run, get_all_active_model_runs, get_latest_prediction
-from app.repositories.outcomes import list_outcomes_for_asset
+from app.repositories.prices import list_prices
 from app.schemas.ensemble import (
     DynamicWeightInfo,
     EnsembleConfig,
@@ -432,21 +432,41 @@ def build_ensemble_signal(
 
 # ── Outcome backfill ──────────────────────────────────────────────────────────
 
+def _actual_return_from_prices(db: Session, asset_id: str, rec_created_at, trading_days: int = 5) -> float | None:
+    """Oblicza rzeczywisty zwrot z cen historycznych N dni handlowych po dacie rekordu."""
+    prices = list_prices(db, asset_id)  # posortowane rosnąco wg timestamp
+    if not prices:
+        return None
+    created_utc = ensure_utc(rec_created_at)
+    # Cena bazowa: ostatnia cena <= created_at
+    base_candidates = [p for p in prices if ensure_utc(p.timestamp) <= created_utc]
+    if not base_candidates:
+        return None
+    base_price = base_candidates[-1].close
+    if not base_price:
+        return None
+    # Cena docelowa: N-ty punkt handlowy po created_at
+    future_prices = [p for p in prices if ensure_utc(p.timestamp) > created_utc]
+    if len(future_prices) < trading_days:
+        return None  # za wcześnie — czekamy na więcej danych
+    target_price = future_prices[trading_days - 1].close
+    return ((target_price - base_price) / base_price) * 100.0
+
+
 def fill_ensemble_outcomes(db: Session) -> int:
     """
-    Wypełnia actual_return_5d i winner dla rekordów ensemble które już mają outcome.
-    Wywoływany co cykl przez scheduler.
+    Wypełnia actual_return_5d i winner dla rekordów ensemble po ~5 dniach.
+    Używa bezpośrednio cen historycznych — działa dla wszystkich aktywów
+    niezależnie od tego czy mają wygenerowane tezy (LLM).
     """
     filled = 0
     pending = get_pending_outcome_records(db, limit=200)
 
     for rec in pending:
-        outcomes = {o.horizon: o for o in list_outcomes_for_asset(db, rec.asset_id, limit=50)}
-        o5d = outcomes.get("5d")
-        if o5d is None:
-            continue  # jeszcze za wcześnie
+        actual_return = _actual_return_from_prices(db, rec.asset_id, rec.created_at, trading_days=5)
+        if actual_return is None:
+            continue  # jeszcze za wcześnie lub brak cen
 
-        actual_return = o5d.realized_return_pct
         actual_up = actual_return > 0
 
         h_correct = None

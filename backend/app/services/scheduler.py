@@ -371,53 +371,92 @@ def run_periodic_sync() -> None:
 # ── Start / stop ─────────────────────────────────────────────────────────────
 
 def _send_daily_portfolio_report() -> None:
-    """Wysyła dzienny raport portfela emailem o 23:30."""
+    """
+    Wysyła dzienny raport portfela emailem w dni robocze, 10 minut po zamknięciu giełdy USA.
+    Giełda NYSE/NASDAQ zamyka się o 16:00 ET = 22:00 czasu polskiego (niezależnie od DST).
+    Job uruchamia się o 22:10 Warsaw — najpierw odświeża ceny i cechy wszystkich aktywów
+    z portfela (świeże dane po sesji), a potem wysyła PDF.
+    """
+    import datetime as _dt
+    # Pomiń weekendy (dodatkowe zabezpieczenie oprócz day_of_week w cron)
+    weekday = _dt.datetime.now().weekday()  # 0=pon … 6=nie
+    if weekday >= 5:
+        print("[scheduler] portfolio-report: weekend — pomijam")
+        return
+
     if not settings.smtp_host or not settings.smtp_username:
+        print("[scheduler] portfolio-report: SMTP nie skonfigurowane — pomijam")
         return
     to_email = settings.report_recipient_email or settings.smtp_from_email
     if not to_email:
         print("[scheduler] portfolio-report: brak REPORT_RECIPIENT_EMAIL i SMTP_FROM_EMAIL — pomijam")
         return
+
+    from app.db.session import SessionLocal
+    from app.repositories.portfolio_positions import list_positions
+    from app.repositories.assets import get_asset
+    from app.services.portfolio_report import send_portfolio_report
+
+    db = SessionLocal()
     try:
-        from app.db.session import SessionLocal
-        from app.repositories.portfolio_positions import list_positions
-        from app.repositories.assets import get_asset
-        from app.services.portfolio_report import send_portfolio_report
-        import urllib.request, json as _json
+        positions = [p for p in list_positions(db) if p.quantity > 0]
+        if not positions:
+            print("[scheduler] portfolio-report: brak aktywnych pozycji — pomijam")
+            return
 
-        db = SessionLocal()
-        try:
-            positions = list_positions(db)
-            if not positions:
-                print("[scheduler] portfolio-report: brak pozycji — pomijam")
-                return
+        print(f"[scheduler] portfolio-report: odświeżam dane dla {len(positions)} pozycji przed raportem…")
 
-            recommendations: dict = {}
-            for pos in positions:
-                if pos.quantity <= 0:
+        # ── Krok 1: świeże ceny + cechy dla aktywów z portfela ───────────────
+        for pos in positions:
+            asset = get_asset(db, pos.asset_id)
+            if asset is None:
+                continue
+            try:
+                result = sync_prices_for_asset(db, asset)
+                log_sync_success(db, asset.id, "prices", result)
+                print(f"[scheduler] portfolio-report: sync cen {asset.id} ({result.inserted} nowych)")
+            except Exception as exc:
+                print(f"[scheduler] portfolio-report: błąd sync cen {asset.id}: {exc}")
+            try:
+                rebuild_asset_features_and_forecasts(db, asset)
+                print(f"[scheduler] portfolio-report: rebuild features {asset.id} OK")
+            except Exception as exc:
+                print(f"[scheduler] portfolio-report: błąd rebuild {asset.id}: {exc}")
+
+        # ── Krok 2: pobierz rekomendacje bezpośrednio z serwisu (bez HTTP) ───
+        from app.services.recommendation_engine import build_recommendation
+        recommendations: dict = {}
+        for pos in positions:
+            asset = get_asset(db, pos.asset_id)
+            if asset is None:
+                continue
+            try:
+                rec = build_recommendation(db, pos.asset_id)
+                if rec is None:
                     continue
-                try:
-                    url = f"http://localhost:8000/assets/{pos.asset_id}/recommendation"
-                    with urllib.request.urlopen(url, timeout=5) as r:
-                        d = _json.loads(r.read())
-                    asset = get_asset(db, pos.asset_id)
-                    recommendations[pos.asset_id] = {
-                        "recommendation":  d.get("recommendation"),
-                        "ml_prediction":   d.get("ml_prediction"),
-                        "forecast_dir_5d": d.get("forecast_dir_5d"),
-                        "forecast_dir_20d": d.get("forecast_dir_20d"),
-                        "last_price":      d.get("last_price"),
-                        "currency":        asset.currency if asset else "USD",
-                    }
-                except Exception as exc:
-                    print(f"[scheduler] portfolio-report: błąd rec dla {pos.asset_id}: {exc}")
+                recommendations[pos.asset_id] = {
+                    "recommendation":  rec.recommendation,
+                    "ml_prediction":   rec.ml_prediction,
+                    "forecast_dir_5d": rec.forecast_dir_5d,
+                    "forecast_dir_20d": rec.forecast_dir_20d,
+                    "last_price":      rec.last_price,
+                    "currency":        asset.currency,
+                }
+                print(f"[scheduler] portfolio-report: rec {asset.id} → {rec.recommendation}")
+            except Exception as exc:
+                print(f"[scheduler] portfolio-report: błąd rekomendacji {pos.asset_id}: {exc}")
 
-            result = send_portfolio_report(db, recommendations, to_email=to_email)
-            print(f"[scheduler] portfolio-report: {result.get('detail')}")
-        finally:
-            db.close()
+        # ── Krok 3: wyślij PDF ────────────────────────────────────────────────
+        result = send_portfolio_report(db, recommendations, to_email=to_email)
+        status = "✓ OK" if result.get("ok") else "✗ BŁĄD"
+        print(f"[scheduler] portfolio-report: {status} — {result.get('detail')}")
+
     except Exception as exc:
-        print(f"[scheduler] portfolio-report: BŁĄD: {exc}")
+        import traceback as _tb
+        print(f"[scheduler] portfolio-report: NIEOCZEKIWANY BŁĄD: {exc}")
+        _tb.print_exc()
+    finally:
+        db.close()
 
 
 def start_scheduler() -> None:
@@ -436,14 +475,15 @@ def start_scheduler() -> None:
     scheduler.add_job(
         _send_daily_portfolio_report,
         "cron",
-        hour=23,
-        minute=30,
+        day_of_week="mon-fri",  # tylko dni robocze
+        hour=22,
+        minute=10,              # 10 min po zamknięciu NYSE/NASDAQ (16:00 ET = 22:00 PL)
         timezone="Europe/Warsaw",
         id="portfolio-report",
         replace_existing=True,
     )
     scheduler.start()
-    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, raport portfela o 23:30")
+    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, raport portfela pn-pt o 22:10")
 
 
 def stop_scheduler() -> None:

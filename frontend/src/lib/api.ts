@@ -407,4 +407,9 @@ export const api = {
 
   syncInsiderAll: () =>
     postJson<{ started: boolean; message: string }>(`${_activeBase}/sync/insider`),
+
+  portfolioPositions: () =>
+    fetchJson<{ asset_id: string; quantity: number; avg_buy_price: number | null }[]>(
+      `${_activeBase}/portfolio/positions`
+    ),
 };
