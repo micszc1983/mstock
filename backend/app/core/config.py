@@ -41,6 +41,13 @@ try:
         notifications_auto_enabled: bool = False
         ml_retrain_auto_enabled: bool = True
 
+        # SMS via SIM800C (USB modem, AT commands)
+        sms_enabled: bool = False
+        sms_serial_port: str = "/dev/ttyUSB0"   # port USB modemu (ls /dev/ttyUSB*)
+        sms_baud_rate: int = 9600
+        sms_recipient_phone: str = ""            # format: +48XXXXXXXXX
+        sms_data_quality_threshold: float = 40.0 # próg overall_score (0-100) poniżej którego alert
+
         @property
         def cors_origins_list(self) -> List[str]:
             """Parsuje cors_origins (string z przecinkami) na listę."""
@@ -91,6 +98,11 @@ except ImportError:
         reports_auto_enabled: bool = os.getenv("REPORTS_AUTO_ENABLED", "false").lower() == "true"
         notifications_auto_enabled: bool = os.getenv("NOTIFICATIONS_AUTO_ENABLED", "false").lower() == "true"
         ml_retrain_auto_enabled: bool = os.getenv("ML_RETRAIN_AUTO_ENABLED", "true").lower() == "true"
+        sms_enabled: bool = os.getenv("SMS_ENABLED", "false").lower() == "true"
+        sms_serial_port: str = os.getenv("SMS_SERIAL_PORT", "/dev/ttyUSB0")
+        sms_baud_rate: int = int(os.getenv("SMS_BAUD_RATE", "9600"))
+        sms_recipient_phone: str = os.getenv("SMS_RECIPIENT_PHONE", "")
+        sms_data_quality_threshold: float = float(os.getenv("SMS_DATA_QUALITY_THRESHOLD", "40.0"))
         cors_origins: list = field(
             default_factory=lambda: os.getenv(
                 "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"

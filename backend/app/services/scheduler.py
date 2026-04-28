@@ -283,6 +283,43 @@ def _step_notifications(db, r: CycleReport) -> None:
             r.err(f"notify/{channel.channel_type}/{channel.id}", exc)
 
 
+def _step_sms_critical(db, r: CycleReport) -> None:
+    """Wysyła SMS dla nowych alertów krytycznych (status='new', severity='critical')."""
+    if not settings.sms_enabled:
+        return
+    try:
+        from app.repositories.alerts import list_alerts
+        from app.services.sms_service import send_sms
+        from app.utils.datetime import ensure_utc, now_utc
+        from datetime import timedelta
+        from sqlalchemy import update
+        from app.db.models import AlertORM
+
+        cutoff = now_utc() - timedelta(hours=2)
+        new_critical = [
+            a for a in list_alerts(db, limit=100)
+            if a.severity == "critical"
+            and a.status == "new"
+            and a.created_at and ensure_utc(a.created_at) >= cutoff
+        ]
+        for alert in new_critical:
+            msg = f"MStock ALERT: {alert.title}\n{alert.message}"
+            sent = send_sms(msg)
+            new_status = "notified_sms" if sent else "active"
+            db.execute(
+                update(AlertORM)
+                .where(AlertORM.id == alert.id)
+                .values(status=new_status)
+            )
+            db.commit()
+            if sent:
+                r.log(f"SMS wysłany: {alert.alert_type}/{alert.asset_id}")
+            else:
+                r.err(f"sms/{alert.alert_type}/{alert.asset_id}", Exception("send_sms returned False"))
+    except Exception as exc:
+        r.err("sms_critical", exc)
+
+
 # ── Główna funkcja cyklu ─────────────────────────────────────────────────────
 
 def run_periodic_sync() -> None:
@@ -357,6 +394,7 @@ def run_periodic_sync() -> None:
             print("[scheduler] → Raporty i notyfikacje")
             _step_reports(db, assets, r)
             _step_notifications(db, r)
+            _step_sms_critical(db, r)
 
     except Exception as exc:
         r.errors.append(f"[fatal] {exc}")

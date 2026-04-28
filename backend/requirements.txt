@@ -33,3 +33,4 @@ anthropic>=0.40.0,<1.0.0
 # torch>=2.2.0                   # lub torch-cpu jeśli brak GPU
 # sentence-transformers>=2.7.0,<4.0.0
 feedparser>=6.0.0,<7.0.0
+pyserial>=3.5,<4.0

@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from app.utils.datetime import ensure_utc, now_utc
-
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.models import AssetORM, DecisionSnapshotORM, SyncLogORM
 from app.repositories.alerts import get_recent_similar_alert, insert_alert, list_alert_rules
 from app.repositories.features import get_latest_feature_snapshot, list_feature_history
 from app.repositories.forecasts import get_latest_forecasts
+from app.repositories.prices import list_prices
+from app.utils.datetime import ensure_utc, now_utc
 
 
 def _within_cooldown(alert_row, cooldown_minutes: int) -> bool:
@@ -136,6 +138,130 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
                     ),
                 )
                 created += 1
+
+    # 4. signal_flip_kup_sprzedaj — KUP → SPRZEDAJ bez TRZYMAJ pośrodku
+    last2_decisions = db.scalars(
+        select(DecisionSnapshotORM)
+        .where(DecisionSnapshotORM.asset_id == asset_id)
+        .order_by(DecisionSnapshotORM.snapshot_at.desc())
+        .limit(2)
+    ).all()
+    if len(last2_decisions) == 2:
+        current_label = last2_decisions[0].action_label
+        previous_label = last2_decisions[1].action_label
+        if previous_label == "KUP" and current_label == "SPRZEDAJ":
+            cfg = _get_rule_config(db, "signal_flip_kup_sprzedaj")
+            prev = get_recent_similar_alert(db, asset_id, "signal_flip_kup_sprzedaj")
+            if not _within_cooldown(prev, cfg.get("cooldown_minutes", 1440)):
+                insert_alert(
+                    db=db,
+                    asset_id=asset_id,
+                    created_at=now_utc(),
+                    alert_type="signal_flip_kup_sprzedaj",
+                    severity="critical",
+                    title=f"{asset_id.upper()}: sygnał zmienił się KUP → SPRZEDAJ",
+                    message=f"Rekomendacja zmieniła się bezpośrednio z KUP na SPRZEDAJ (bez TRZYMAJ pośrodku).",
+                    status="new",
+                    trigger_value=1.0,
+                    threshold_value=1.0,
+                    snapshot_json=json.dumps({
+                        "previous_label": previous_label,
+                        "current_label": current_label,
+                        "snapshot_at": str(last2_decisions[0].snapshot_at),
+                    }),
+                )
+                created += 1
+
+    # 5. price_drop_session — spadek ceny >5% między ostatnimi dwoma sesjami
+    prices = list_prices(db, asset_id, limit=2)
+    if len(prices) == 2:
+        prev_close = prices[0].close
+        last_close = prices[1].close
+        if prev_close and last_close and prev_close > 0:
+            drop_pct = (last_close - prev_close) / prev_close * 100.0
+            if drop_pct < -5.0:
+                cfg = _get_rule_config(db, "price_drop_session")
+                prev_alert = get_recent_similar_alert(db, asset_id, "price_drop_session")
+                if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 60)):
+                    insert_alert(
+                        db=db,
+                        asset_id=asset_id,
+                        created_at=now_utc(),
+                        alert_type="price_drop_session",
+                        severity="critical",
+                        title=f"{asset_id.upper()}: gwałtowny spadek ceny {drop_pct:.1f}%",
+                        message=f"Cena spadła o {abs(drop_pct):.1f}% (z {prev_close:.2f} do {last_close:.2f}) w ciągu jednej sesji.",
+                        status="new",
+                        trigger_value=round(drop_pct, 2),
+                        threshold_value=-5.0,
+                        snapshot_json=json.dumps({
+                            "prev_close": prev_close,
+                            "last_close": last_close,
+                            "drop_pct": round(drop_pct, 2),
+                        }),
+                    )
+                    created += 1
+
+    # 6. dead_data — ostatnie 2+ cykle synchronizacji zakończyły się błędem
+    last2_syncs = db.scalars(
+        select(SyncLogORM)
+        .where(SyncLogORM.asset_id == asset_id, SyncLogORM.sync_type == "prices")
+        .order_by(SyncLogORM.created_at.desc())
+        .limit(2)
+    ).all()
+    if len(last2_syncs) >= 2 and all(s.status == "error" for s in last2_syncs):
+        cfg = _get_rule_config(db, "dead_data")
+        prev_alert = get_recent_similar_alert(db, asset_id, "dead_data")
+        if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 120)):
+            insert_alert(
+                db=db,
+                asset_id=asset_id,
+                created_at=now_utc(),
+                alert_type="dead_data",
+                severity="critical",
+                title=f"{asset_id.upper()}: martwe dane — 2 kolejne błędy synchronizacji",
+                message=f"Pobieranie cen zakończyło się błędem przez {len(last2_syncs)} kolejne cykle synchronizacji.",
+                status="new",
+                trigger_value=float(len(last2_syncs)),
+                threshold_value=2.0,
+                snapshot_json=json.dumps({
+                    "errors": [{"created_at": str(s.created_at), "detail": s.detail} for s in last2_syncs],
+                }),
+            )
+            created += 1
+
+    # 7. data_quality_low — overall_score poniżej progu
+    try:
+        from app.core.config import settings
+        from app.services.data_quality import check_asset_quality
+        asset_row = db.scalar(select(AssetORM).where(AssetORM.id == asset_id))
+        if asset_row is not None:
+            quality = check_asset_quality(db, asset_row)
+            quality_pct = quality.overall_score * 100.0
+            threshold = settings.sms_data_quality_threshold
+            if quality_pct < threshold:
+                cfg = _get_rule_config(db, "data_quality_low")
+                prev_alert = get_recent_similar_alert(db, asset_id, "data_quality_low")
+                if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 1440)):
+                    insert_alert(
+                        db=db,
+                        asset_id=asset_id,
+                        created_at=now_utc(),
+                        alert_type="data_quality_low",
+                        severity="critical",
+                        title=f"{asset_id.upper()}: niska jakość danych ({quality_pct:.1f}%)",
+                        message=f"Wskaźnik jakości danych spadł do {quality_pct:.1f}%, poniżej progu {threshold:.1f}%.",
+                        status="new",
+                        trigger_value=round(quality_pct, 2),
+                        threshold_value=threshold,
+                        snapshot_json=json.dumps({
+                            "overall_score": quality.overall_score,
+                            "threshold": threshold,
+                        }),
+                    )
+                    created += 1
+    except Exception as _dq_exc:
+        pass  # nie przerywaj cyklu jeśli data_quality_check zawiedzie
 
     db.commit()
     return created

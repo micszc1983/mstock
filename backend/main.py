@@ -427,6 +427,19 @@ def admin_send_portfolio_report():
     return {"started": True, "to_email": to}
 
 
+@app.post("/admin/test-sms")
+def admin_test_sms():
+    """Wysyła testowy SMS przez SIM800C. Używaj do weryfikacji połączenia z modemem."""
+    from app.services.sms_service import test_sms
+    from app.core.config import settings
+    if not settings.sms_enabled:
+        return {"sent": False, "reason": "SMS_ENABLED=false w .env"}
+    if not settings.sms_recipient_phone:
+        return {"sent": False, "reason": "SMS_RECIPIENT_PHONE nie skonfigurowany w .env"}
+    sent = test_sms()
+    return {"sent": sent, "port": settings.sms_serial_port, "recipient": settings.sms_recipient_phone}
+
+
 @app.post("/admin/rebuild-ml-predictions")
 def admin_rebuild_ml_predictions():
     """Odbuduj tabelę ml_predictions (usuwa i tworzy od nowa, potem uruchamia scoring)."""
