@@ -67,3 +67,5 @@ class AssetRecommendation(BaseModel):
 
     # Dane wynikowe
     earnings_surprise_pct: Optional[float] = None  # EPS surprise % ostatniego raportu (< 90 dni)
+
+    last_price: Optional[float] = None  # ostatnia cena zamknięcia z DailyAssetFeatureORM

@@ -317,6 +317,7 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         put_call_ratio=round(feature.put_call_ratio, 3) if feature.put_call_ratio is not None else None,
         iv_rank=round(feature.iv_rank, 1) if feature.iv_rank is not None else None,
         earnings_surprise_pct=round(earnings_surprise_pct, 2) if earnings_surprise_pct is not None else None,
+        last_price=feature.last_price if feature.last_price else None,
     )
 
 
