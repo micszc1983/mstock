@@ -52,6 +52,7 @@ import type {
   DynamicWeightInfo,
   InsiderTrade,
   ShortInterest,
+  TopPick,
 } from "./lib/types";
 import {
   OutcomesChart,
@@ -99,7 +100,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider" | "toppicks">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -153,6 +154,7 @@ export default function App() {
   const [shortInterest, setShortInterest] = useState<ShortInterest[]>([]);
   const [syncingInsider, setSyncingInsider] = useState(false);
   const [portfolioPositions, setPortfolioPositions] = useState<{ asset_id: string; quantity: number; avg_buy_price: number | null }[]>([]);
+  const [topPicks, setTopPicks] = useState<TopPick[]>([]);
   const [ensembleMode, setEnsembleMode] = useState<string>("ensemble_weighted");
   const [showAddAsset, setShowAddAsset] = useState(false);
   const [newAsset, setNewAsset] = useState<AssetCreate>({
@@ -314,6 +316,7 @@ export default function App() {
         currentEnsembleDynWeights,
         currentInsiderTrades,
         currentShortInterest,
+        currentTopPicks,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -334,6 +337,7 @@ export default function App() {
         api.ensembleWeights(selectedAsset).catch(() => null),
         api.insiderTrades(selectedAsset).catch(() => []),
         api.shortInterest(selectedAsset).catch(() => []),
+        api.topPicks().catch(() => []),
       ]);
 
       setEvents(notificationEvents);
@@ -352,6 +356,7 @@ export default function App() {
       setEnsembleDynWeights(currentEnsembleDynWeights);
       setInsiderTrades(currentInsiderTrades);
       setShortInterest(currentShortInterest);
+      setTopPicks(currentTopPicks);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -764,7 +769,7 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["toppicks", "⭐ Top Picks"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -775,7 +780,7 @@ async function notifyFirstEmail() {
               borderBottom: activeTab === id ? "2px solid var(--accent)" : "2px solid transparent",
               marginBottom: -2, borderRadius: "4px 4px 0 0", transition: "color 0.15s",
             }}
-          >{label}</button>
+          >{id === "toppicks" ? `⭐ Top Picks (${topPicks.length})` : label}</button>
         ))}
       </div>
 
@@ -3087,6 +3092,186 @@ async function notifyFirstEmail() {
           </>
         );
       })()}
+
+      {/* ── Zakładka Top Picks ───────────────────────────────────────────── */}
+      {activeTab === "toppicks" && (
+        <Section
+          title="Top Picks — najlepsze z najlepszych"
+          subtitle="Aktywa, w których wszystkie sygnały wskazują kierunek wzrostowy z najwyższą zbieżnością. Wymagane: rekomendacja KUP, composite ≥ 65, co najmniej 6/9 sygnałów i pewność ≥ 62%."
+        >
+          {topPicks.length === 0 ? (
+            <div style={{ padding: "2rem 0", textAlign: "center", color: "var(--text-3)", fontSize: "0.9rem" }}>
+              <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>⭐</div>
+              <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Brak Top Picks w tej chwili</div>
+              <div>Żadne aktywo nie spełnia wszystkich kryteriów. Odśwież dane lub poczekaj na kolejny cykl analizy.</div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              {topPicks.map((pick, idx) => {
+                const medal = idx === 0 ? { bg: "rgba(251,191,36,0.12)", border: "#f59e0b", icon: "🥇" }
+                            : idx === 1 ? { bg: "rgba(148,163,184,0.1)", border: "#94a3b8", icon: "🥈" }
+                            : idx === 2 ? { bg: "rgba(180,120,60,0.1)", border: "#b45309", icon: "🥉" }
+                            : { bg: "var(--surface)", border: "var(--border)", icon: "⭐" };
+
+                const certaintyPct = (pick.certainty_score * 100).toFixed(1);
+                const certaintyColor = pick.certainty_score >= 0.8 ? "#16a34a"
+                                     : pick.certainty_score >= 0.7 ? "#2563eb"
+                                     : "#f59e0b";
+
+                const recColor = pick.recommendation === "KUP" ? "#16a34a"
+                               : pick.recommendation === "SPRZEDAJ" ? "#dc2626"
+                               : "#f59e0b";
+
+                const assetCurr = assetCurrencyMap.get(pick.asset_id) ?? "USD";
+                const priceStr = pick.last_price != null ? fmtPrice(pick.last_price, assetCurr) : "—";
+                const priceLabel = pick.last_price != null ? displayLabel(assetCurr) : "";
+
+                return (
+                  <div
+                    key={pick.asset_id}
+                    style={{
+                      background: medal.bg,
+                      border: `1.5px solid ${medal.border}`,
+                      borderRadius: 10,
+                      padding: "1rem 1.25rem",
+                    }}
+                  >
+                    {/* Header row */}
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", marginBottom: "0.75rem" }}>
+                      <div style={{ fontSize: "1.8rem", lineHeight: 1 }}>{medal.icon}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, fontSize: "1.05rem" }}>
+                            #{idx + 1} {pick.name}
+                          </span>
+                          <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-3)", background: "var(--surface)", padding: "1px 6px", borderRadius: 4 }}>
+                            {pick.symbol}
+                          </span>
+                          <span style={{ fontSize: "0.78rem", fontWeight: 700, color: recColor, background: `${recColor}18`, padding: "2px 8px", borderRadius: 4 }}>
+                            {pick.recommendation}
+                          </span>
+                          <span style={{ fontSize: "0.78rem", color: "var(--text-3)", marginLeft: "auto" }}>
+                            {pick.regime}
+                          </span>
+                        </div>
+
+                        {/* Certainty score bar */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem" }}>
+                          <span style={{ fontSize: "0.78rem", color: "var(--text-3)", whiteSpace: "nowrap" }}>Pewność:</span>
+                          <div style={{ flex: 1, height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${pick.certainty_score * 100}%`, background: certaintyColor, borderRadius: 4, transition: "width 0.4s" }} />
+                          </div>
+                          <span style={{ fontWeight: 700, color: certaintyColor, fontSize: "0.92rem", whiteSpace: "nowrap" }}>
+                            {certaintyPct}%
+                          </span>
+                        </div>
+
+                        {/* Signals aligned */}
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.25rem" }}>
+                          <span style={{ fontSize: "0.78rem", color: "var(--text-3)", whiteSpace: "nowrap" }}>Sygnały:</span>
+                          {Array.from({ length: pick.max_signals }).map((_, i) => {
+                            const isAligned = i < pick.signals_aligned;
+                            return (
+                              <div
+                                key={i}
+                                style={{
+                                  width: 10, height: 10, borderRadius: 2,
+                                  background: isAligned ? "#16a34a" : "var(--border)",
+                                  transition: "background 0.2s",
+                                }}
+                                title={isAligned ? (pick.aligned_labels[i] ?? "") : (pick.missing_labels[i - pick.signals_aligned] ?? "brak sygnału")}
+                              />
+                            );
+                          })}
+                          <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "#16a34a" }}>
+                            {pick.signals_aligned}/{pick.max_signals}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Price + KPI */}
+                      <div style={{ textAlign: "right", minWidth: 90 }}>
+                        <div style={{ fontSize: "1.1rem", fontWeight: 700 }}>{priceStr}</div>
+                        {priceLabel && <div style={{ fontSize: "0.72rem", color: "var(--text-3)" }}>{priceLabel}</div>}
+                        <div style={{ fontSize: "0.78rem", marginTop: "0.3rem", color: "var(--text-3)" }}>
+                          Composite: <span style={{ fontWeight: 600, color: "var(--text)" }}>{pick.composite_score.toFixed(0)}</span>
+                        </div>
+                        <div style={{ fontSize: "0.78rem", color: "var(--text-3)" }}>
+                          Conviction: <span style={{ fontWeight: 600, color: "var(--text)" }}>{pick.conviction_score != null ? pick.conviction_score.toFixed(0) : "—"}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Signal checklist */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.75rem" }}>
+                      {pick.aligned_labels.map(label => (
+                        <span key={label} style={{
+                          fontSize: "0.72rem", padding: "2px 8px", borderRadius: 12,
+                          background: "rgba(22,163,74,0.1)", color: "#16a34a",
+                          border: "1px solid rgba(22,163,74,0.25)", fontWeight: 500,
+                          display: "inline-flex", alignItems: "center", gap: 3,
+                        }}>
+                          ✓ {label}
+                        </span>
+                      ))}
+                      {pick.missing_labels.map(label => (
+                        <span key={label} style={{
+                          fontSize: "0.72rem", padding: "2px 8px", borderRadius: 12,
+                          background: "var(--surface)", color: "var(--text-3)",
+                          border: "1px solid var(--border)", fontWeight: 400,
+                          display: "inline-flex", alignItems: "center", gap: 3,
+                        }}>
+                          · {label}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Metrics row */}
+                    <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginBottom: "0.6rem", fontSize: "0.8rem" }}>
+                      {[
+                        ["Trend", `${pick.trend_score.toFixed(0)}`, pick.trend_score >= 55 ? "#16a34a" : "var(--text-3)"],
+                        ["Sentiment", `${pick.sentiment_score.toFixed(0)}`, pick.sentiment_score >= 50 ? "#16a34a" : "var(--text-3)"],
+                        ["Fragility", `${pick.fragility_score.toFixed(0)}`, pick.fragility_score <= 40 ? "#16a34a" : "#dc2626"],
+                        ["Ryzyko", pick.risk_score != null ? `${pick.risk_score.toFixed(0)}` : "—", (pick.risk_score ?? 100) <= 40 ? "#16a34a" : "#dc2626"],
+                        ["ML 5d", pick.ml_prob_up != null ? `${pick.ml_prob_up.toFixed(0)}%↑` : "—", (pick.ml_prob_up ?? 0) >= 60 ? "#16a34a" : "var(--text-3)"],
+                        ["ML 20d", pick.ml_20d_prob_up != null ? `${pick.ml_20d_prob_up.toFixed(0)}%↑` : "—", (pick.ml_20d_prob_up ?? 0) >= 60 ? "#16a34a" : "var(--text-3)"],
+                        ["Prog 5d", pick.forecast_dir_5d ?? "—", pick.forecast_dir_5d === "up" ? "#16a34a" : pick.forecast_dir_5d === "down" ? "#dc2626" : "var(--text-3)"],
+                        ["Prog 20d", pick.forecast_dir_20d ?? "—", pick.forecast_dir_20d === "up" ? "#16a34a" : pick.forecast_dir_20d === "down" ? "#dc2626" : "var(--text-3)"],
+                      ].map(([lbl, val, color]) => (
+                        <div key={lbl} style={{ display: "flex", flexDirection: "column", alignItems: "center", minWidth: 55 }}>
+                          <span style={{ color: "var(--text-3)", fontSize: "0.7rem" }}>{lbl}</span>
+                          <span style={{ fontWeight: 600, color: color as string }}>{val}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Rationale */}
+                    {pick.rationale && (
+                      <div style={{ fontSize: "0.8rem", color: "var(--text-2)", lineHeight: 1.5, borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                        {pick.rationale}
+                      </div>
+                    )}
+
+                    {/* Navigate */}
+                    <div style={{ marginTop: "0.5rem", textAlign: "right" }}>
+                      <button
+                        onClick={() => { setSelectedAsset(pick.asset_id); setActiveTab("analysis"); }}
+                        style={{
+                          fontSize: "0.75rem", padding: "3px 12px", borderRadius: 6,
+                          border: `1px solid ${medal.border}`, background: "transparent",
+                          color: "var(--text)", cursor: "pointer", fontWeight: 500,
+                        }}
+                      >
+                        Otwórz analizę →
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Section>
+      )}
 
     </PageContainer>
   );}

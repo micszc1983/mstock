@@ -24,7 +24,7 @@ from app.repositories.forecasts import get_latest_forecasts
 from app.repositories.ml import get_latest_prediction
 from app.repositories.theses import get_latest_thesis
 from app.services.quality_metrics import build_thesis_quality_summary
-from app.schemas.recommendation import AssetRecommendation, SignalContribution
+from app.schemas.recommendation import AssetRecommendation, SignalContribution, TopPick
 from app.utils.datetime import ensure_utc
 
 
@@ -327,7 +327,120 @@ def build_all_recommendations(db: Session) -> list[AssetRecommendation]:
         rec = build_recommendation(db, asset.id)
         if rec is not None:
             results.append(rec)
-    # Sortuj: KUP → TRZYMAJ → SPRZEDAJ, potem malejąco po composite_score
     order = {"KUP": 0, "TRZYMAJ": 1, "SPRZEDAJ": 2}
     results.sort(key=lambda r: (order.get(r.recommendation, 1), -r.composite_score))
     return results
+
+
+# ── Top Picks ─────────────────────────────────────────────────────────────────
+
+_SIGNAL_CHECKS: list[tuple[str, str]] = [
+    ("composite_score >= 65",      "Silny wynik kompozytowy (≥65)"),
+    ("conviction_score >= 60",     "Wysokie przekonanie (≥60)"),
+    ("risk_score <= 40",           "Niskie ryzyko (≤40)"),
+    ("ml_prediction == up",        "ML 5d: wzrost"),
+    ("ml_20d_prediction == up",    "ML 20d: wzrost"),
+    ("forecast_dir_5d == up",      "Prognoza 5d: wzrost"),
+    ("forecast_dir_20d == up",     "Prognoza 20d: wzrost"),
+    ("fragility_score <= 40",      "Niska kruchość (≤40)"),
+    ("trend_score >= 55",          "Silny trend (≥55)"),
+]
+
+
+def _check_signal(rec: AssetRecommendation, check: str) -> bool:
+    if check == "composite_score >= 65":
+        return rec.composite_score >= 65
+    if check == "conviction_score >= 60":
+        return rec.conviction_score is not None and rec.conviction_score >= 60
+    if check == "risk_score <= 40":
+        return rec.risk_score is not None and rec.risk_score <= 40
+    if check == "ml_prediction == up":
+        return rec.ml_prediction == "up"
+    if check == "ml_20d_prediction == up":
+        return rec.ml_20d_prediction == "up"
+    if check == "forecast_dir_5d == up":
+        return rec.forecast_dir_5d == "up"
+    if check == "forecast_dir_20d == up":
+        return rec.forecast_dir_20d == "up"
+    if check == "fragility_score <= 40":
+        return rec.fragility_score <= 40
+    if check == "trend_score >= 55":
+        return rec.trend_score >= 55
+    return False
+
+
+def _compute_certainty(rec: AssetRecommendation) -> float:
+    weighted: list[tuple[float, float]] = []
+
+    weighted.append((rec.composite_score, 0.22))
+
+    if rec.conviction_score is not None:
+        weighted.append((rec.conviction_score, 0.18))
+
+    if rec.risk_score is not None:
+        weighted.append((100.0 - rec.risk_score, 0.15))
+
+    if rec.ml_prob_up is not None:
+        weighted.append((rec.ml_prob_up, 0.18))
+
+    if rec.ml_20d_prob_up is not None:
+        weighted.append((rec.ml_20d_prob_up, 0.08))
+
+    if rec.forecast_up_5d is not None:
+        weighted.append((rec.forecast_up_5d, 0.09))
+
+    if rec.forecast_up_20d is not None:
+        weighted.append((rec.forecast_up_20d, 0.05))
+
+    weighted.append((max(0.0, min(100.0, rec.trend_score / 2.0 + 50.0)), 0.05))
+
+    total_w = sum(w for _, w in weighted)
+    if total_w == 0:
+        return 0.0
+    return round(sum(v * w for v, w in weighted) / total_w, 1)
+
+
+def build_top_picks(db: Session, min_signals: int = 6) -> list[TopPick]:
+    """
+    Zwraca aktywa gdzie wszystkie kluczowe sygnały są zgodne (bullish).
+    Minimalne wymagania:
+      - recommendation == "KUP"
+      - composite_score >= 65
+      - co najmniej min_signals z 9 sygnałów zgodnych
+      - certainty_score >= 62
+    """
+    picks: list[TopPick] = []
+
+    for asset in list_assets(db):
+        rec = build_recommendation(db, asset.id)
+        if rec is None:
+            continue
+        if rec.recommendation != "KUP":
+            continue
+        if rec.composite_score < 65:
+            continue
+
+        aligned, missing = [], []
+        for check, label in _SIGNAL_CHECKS:
+            if _check_signal(rec, check):
+                aligned.append(label)
+            else:
+                missing.append(label)
+
+        if len(aligned) < min_signals:
+            continue
+
+        certainty = _compute_certainty(rec)
+        if certainty < 62:
+            continue
+
+        picks.append(TopPick(
+            **rec.model_dump(),
+            certainty_score=certainty,
+            signals_aligned=len(aligned),
+            aligned_labels=aligned,
+            missing_labels=missing,
+        ))
+
+    picks.sort(key=lambda p: -p.certainty_score)
+    return picks

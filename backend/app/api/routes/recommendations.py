@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.recommendation import AssetRecommendation
-from app.services.recommendation_engine import build_all_recommendations, build_recommendation
+from app.schemas.recommendation import AssetRecommendation, TopPick
+from app.services.recommendation_engine import build_all_recommendations, build_recommendation, build_top_picks
 
 router = APIRouter(tags=["recommendations"])
 
@@ -14,6 +14,12 @@ router = APIRouter(tags=["recommendations"])
 def get_all_recommendations(db: Session = Depends(get_db)) -> list[AssetRecommendation]:
     """Rekomendacje dla wszystkich aktywów posortowane: KUP → TRZYMAJ → SPRZEDAJ."""
     return build_all_recommendations(db)
+
+
+@router.get("/top-picks", response_model=list[TopPick])
+def get_top_picks(db: Session = Depends(get_db)) -> list[TopPick]:
+    """Aktywa z maksymalną zbieżnością wszystkich sygnałów bullish."""
+    return build_top_picks(db)
 
 
 @router.get("/assets/{asset_id}/recommendation", response_model=AssetRecommendation)

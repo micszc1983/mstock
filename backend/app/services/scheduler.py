@@ -320,6 +320,135 @@ def _step_sms_critical(db, r: CycleReport) -> None:
         r.err("sms_critical", exc)
 
 
+# ── Śledzenie Top Picks między cyklami (pamięć in-process) ───────────────────
+
+_prev_top_picks: set[str] = set()
+_top_picks_initialized: bool = False
+
+
+def _step_sms_new_top_pick(db, r: CycleReport) -> None:
+    """Wysyła SMS gdy nowe aktywo pojawia się w Top Picks po raz pierwszy w tym cyklu."""
+    global _prev_top_picks, _top_picks_initialized
+    if not settings.sms_enabled:
+        return
+    try:
+        from app.services.recommendation_engine import build_top_picks
+        from app.services.sms_service import send_sms
+
+        current_picks = build_top_picks(db)
+        current_ids = {p.asset_id for p in current_picks}
+
+        if not _top_picks_initialized:
+            _prev_top_picks = current_ids
+            _top_picks_initialized = True
+            r.log(f"Top Picks init: {len(current_ids)} aktywow w pierwszym cyklu")
+            return
+
+        new_entries = current_ids - _prev_top_picks
+        _prev_top_picks = current_ids
+
+        for pick in current_picks:
+            if pick.asset_id not in new_entries:
+                continue
+            msg = (
+                f"MStock TOP PICK: {pick.symbol} ({pick.asset_id.upper()}) "
+                f"nowe! Pewnosc: {pick.certainty_score * 100:.0f}%, "
+                f"Sygnaly: {pick.signals_aligned}/{pick.max_signals}, "
+                f"Composite: {pick.composite_score:.0f}"
+            )
+            sent = send_sms(msg)
+            if sent:
+                r.log(f"SMS Top Pick nowy: {pick.asset_id}")
+            else:
+                r.err(f"sms_top_pick/{pick.asset_id}", Exception("send_sms=False"))
+    except Exception as exc:
+        r.err("sms_new_top_pick", exc)
+
+
+def _step_sms_portfolio_sell_urgent(db, r: CycleReport) -> None:
+    """Wysyła SMS gdy aktywo z portfela ma rekomendację SPRZEDAJ + wysoki risk lub fragility."""
+    if not settings.sms_enabled:
+        return
+    try:
+        import json as _json
+        from datetime import timedelta
+
+        from sqlalchemy import select, update
+
+        from app.db.models import AlertORM
+        from app.repositories.alerts import get_recent_similar_alert, insert_alert
+        from app.repositories.assets import get_asset
+        from app.repositories.portfolio_positions import list_positions
+        from app.services.recommendation_engine import build_recommendation
+        from app.services.sms_service import send_sms
+        from app.utils.datetime import ensure_utc, now_utc
+
+        COOLDOWN_MIN = 360  # 6 godzin między kolejnymi SMS dla tego samego aktywa
+
+        positions = [p for p in list_positions(db) if p.quantity > 0]
+        for pos in positions:
+            asset = get_asset(db, pos.asset_id)
+            if asset is None:
+                continue
+            try:
+                rec = build_recommendation(db, pos.asset_id)
+                if rec is None:
+                    continue
+
+                is_sell_rec    = rec.recommendation == "SPRZEDAJ"
+                is_sell_action = rec.action_label == "SPRZEDAJ"
+                high_risk      = (rec.risk_score or 0) >= 65
+                high_fragility = rec.fragility_score >= 65
+
+                # Warunek: rekomendacja SPRZEDAJ + przynajmniej jeden dodatkowy sygnał
+                if not (is_sell_rec and (is_sell_action or high_risk or high_fragility)):
+                    continue
+
+                prev_alert = get_recent_similar_alert(db, pos.asset_id, "portfolio_sell_urgent_sms")
+                if prev_alert is not None:
+                    age = now_utc() - ensure_utc(prev_alert.created_at)
+                    if age < timedelta(minutes=COOLDOWN_MIN):
+                        continue
+
+                reasons = []
+                if is_sell_action:
+                    reasons.append("decision=SPRZEDAJ")
+                if high_risk:
+                    reasons.append(f"risk={int(rec.risk_score or 0)}")
+                if high_fragility:
+                    reasons.append(f"fragility={int(rec.fragility_score)}")
+
+                price_str = f"{rec.last_price:.2f}" if rec.last_price else "?"
+                msg = (
+                    f"MStock PILNE SPRZEDAJ: {rec.symbol} ({pos.asset_id.upper()}) "
+                    f"{', '.join(reasons)}. Cena: {price_str} {asset.currency}"
+                )
+                sent = send_sms(msg)
+                title = f"{pos.asset_id.upper()}: pilna sprzedaz z portfela"
+                insert_alert(
+                    db=db,
+                    asset_id=pos.asset_id,
+                    created_at=now_utc(),
+                    alert_type="portfolio_sell_urgent_sms",
+                    severity="critical",
+                    title=title,
+                    message=msg,
+                    status="notified_sms" if sent else "new",
+                    trigger_value=float(rec.composite_score),
+                    threshold_value=50.0,
+                    snapshot_json=_json.dumps({"reasons": reasons, "sent": sent}),
+                )
+                db.commit()
+                if sent:
+                    r.log(f"SMS sell urgent: {pos.asset_id} ({', '.join(reasons)})")
+                else:
+                    r.err(f"sms_sell_urgent/{pos.asset_id}", Exception("send_sms=False"))
+            except Exception as exc:
+                r.err(f"sms_sell_urgent/{pos.asset_id}", exc)
+    except Exception as exc:
+        r.err("sms_portfolio_sell_urgent", exc)
+
+
 # ── Główna funkcja cyklu ─────────────────────────────────────────────────────
 
 def run_periodic_sync() -> None:
@@ -395,6 +524,8 @@ def run_periodic_sync() -> None:
             _step_reports(db, assets, r)
             _step_notifications(db, r)
             _step_sms_critical(db, r)
+            _step_sms_new_top_pick(db, r)
+            _step_sms_portfolio_sell_urgent(db, r)
 
     except Exception as exc:
         r.errors.append(f"[fatal] {exc}")
@@ -497,6 +628,224 @@ def _send_daily_portfolio_report() -> None:
         db.close()
 
 
+def _handle_sms_commands() -> None:
+    """
+    Sprawdza skrzynkę SMS modemu SIM800C i obsługuje znane komendy.
+    Uruchamiane co 5 minut przez scheduler.
+
+    Obsługiwane komendy (wielkość liter bez znaczenia):
+      "raport" — wysyła aktualny raport portfela na maila
+    """
+    if not settings.sms_enabled:
+        return
+
+    try:
+        from app.services.sms_service import read_and_clear_sms, send_sms
+        messages = read_and_clear_sms()
+    except Exception as exc:
+        print(f"[sms-cmd] błąd odczytu SMS: {exc}")
+        return
+
+    for msg in messages:
+        cmd = msg.text.strip().lower().rstrip(".!?,;")
+        print(f"[sms-cmd] SMS od {msg.sender}: {msg.text!r} (cmd={cmd!r})")
+
+        if cmd == "raport":
+            print(f"[sms-cmd] komenda RAPORT — generuję raport portfela…")
+            try:
+                _handle_cmd_raport(msg.sender)
+            except Exception as exc:
+                print(f"[sms-cmd] błąd obsługi komendy raport: {exc}")
+                traceback.print_exc()
+        else:
+            print(f"[sms-cmd] nieznana komenda: {msg.text!r} — ignoruję")
+
+
+def _handle_cmd_raport(requestor_phone: str) -> None:
+    """Generuje i wysyła raport portfela na maila, potwierdzenie SMS."""
+    from app.services.sms_service import send_sms
+
+    to_email = settings.report_recipient_email or settings.smtp_from_email
+    if not to_email:
+        send_sms("MStock: brak REPORT_RECIPIENT_EMAIL w .env - raport niemozliwy.", requestor_phone)
+        return
+
+    if not settings.smtp_host or not settings.smtp_username:
+        send_sms("MStock: SMTP nie skonfigurowane - raport niemozliwy.", requestor_phone)
+        return
+
+    send_sms(f"MStock: generuje raport portfela, wysle na {to_email}...", requestor_phone)
+
+    db = SessionLocal()
+    try:
+        from app.repositories.portfolio_positions import list_positions
+        from app.repositories.assets import get_asset
+        from app.services.portfolio_report import send_portfolio_report
+        from app.services.recommendation_engine import build_recommendation
+
+        positions = [p for p in list_positions(db) if p.quantity > 0]
+        if not positions:
+            send_sms("MStock: brak aktywnych pozycji w portfelu.", requestor_phone)
+            return
+
+        # Zbierz rekomendacje (bez odświeżania danych — używamy ostatnich znanych)
+        recommendations: dict = {}
+        for pos in positions:
+            asset = get_asset(db, pos.asset_id)
+            if asset is None:
+                continue
+            try:
+                rec = build_recommendation(db, pos.asset_id)
+                if rec is None:
+                    continue
+                recommendations[pos.asset_id] = {
+                    "recommendation":   rec.recommendation,
+                    "ml_prediction":    rec.ml_prediction,
+                    "forecast_dir_5d":  rec.forecast_dir_5d,
+                    "forecast_dir_20d": rec.forecast_dir_20d,
+                    "last_price":       rec.last_price,
+                    "currency":         asset.currency,
+                }
+            except Exception as exc:
+                print(f"[sms-cmd] błąd rekomendacji {pos.asset_id}: {exc}")
+
+        result = send_portfolio_report(db, recommendations, to_email=to_email)
+
+        if result.get("ok"):
+            send_sms(f"MStock: raport wyslany na {to_email}.", requestor_phone)
+            print(f"[sms-cmd] raport wyslany na {to_email}")
+        else:
+            send_sms(f"MStock: blad wysylki raportu - {result.get('detail', '?')[:80]}", requestor_phone)
+            print(f"[sms-cmd] blad raportu: {result.get('detail')}")
+
+    except Exception as exc:
+        send_sms(f"MStock: blad generowania raportu: {str(exc)[:80]}", requestor_phone)
+        print(f"[sms-cmd] BŁĄD: {exc}")
+        traceback.print_exc()
+    finally:
+        db.close()
+
+
+def _step_news_alerts() -> None:
+    """
+    Monitorowanie newsow w czasie rzeczywistym (co 5 min).
+    Odpytuje Finnhub dla aktywow z portfela i watchlist.
+    Wysluje SMS gdy pojawi sie istotny negatywny news.
+    """
+    if not settings.sms_enabled or not settings.finnhub_api_key:
+        return
+    try:
+        from app.repositories.assets import get_asset
+        from app.repositories.portfolio_positions import list_positions
+        from app.repositories.watchlists import list_watchlists, list_watchlist_assets
+        from app.services.news_alert_service import scan_recent_news, mark_seen
+        from app.services.sms_service import send_sms
+
+        with SessionLocal() as db:
+            # Zbierz asset_id: portfel (priorytet) + wszystkie watchlisty
+            asset_ids: set[str] = set()
+            for pos in list_positions(db):
+                if pos.quantity > 0:
+                    asset_ids.add(pos.asset_id)
+            for wl in list_watchlists(db):
+                for aid in list_watchlist_assets(db, wl.id):
+                    asset_ids.add(aid)
+
+            # Pobierz symbole — tylko US stocks (Finnhub company-news)
+            assets_to_scan: list[tuple[str, str, str | None]] = []
+            for aid in asset_ids:
+                asset = get_asset(db, aid)
+                if asset and asset.type == "stock":
+                    assets_to_scan.append((aid, asset.symbol, asset.news_symbol))
+
+        if not assets_to_scan:
+            return
+
+        signals = scan_recent_news(assets_to_scan, lookback_minutes=90)
+        if not signals:
+            return
+
+        seen: list[str] = []
+        sent = 0
+        for sig in signals[:4]:  # max 4 SMS na cykl, zeby nie spamowac
+            headline_short = sig.headline[:110].replace("\n", " ")
+            msg = (
+                f"MStock NEWS: {sig.symbol} - {headline_short} "
+                f"[{sig.source}]"
+            )
+            ok = send_sms(msg)
+            seen.append(sig.news_id)
+            if ok:
+                sent += 1
+                print(
+                    f"[news-alert] SMS wyslany: {sig.asset_id} "
+                    f"neg={sig.neg_score} '{sig.headline[:60]}'"
+                )
+            else:
+                print(f"[news-alert] SMS blad: {sig.asset_id} '{sig.headline[:60]}'")
+
+        mark_seen(seen)
+        if sent:
+            print(f"[news-alert] Wyslano {sent} SMS dla {len(signals)} sygnalow")
+
+    except Exception as exc:
+        print(f"[news-alert] BLAD: {exc}")
+        traceback.print_exc()
+
+
+def _is_market_hours() -> bool:
+    """Zwraca True jeśli aktualny czas mieści się w godzinach sesji NYSE (15:30–22:15 Warsaw)."""
+    from zoneinfo import ZoneInfo
+    now_pl = datetime.now(ZoneInfo("Europe/Warsaw"))
+    # Tylko dni robocze
+    if now_pl.weekday() >= 5:
+        return False
+    minutes = now_pl.hour * 60 + now_pl.minute
+    return 15 * 60 + 25 <= minutes <= 22 * 60 + 15  # 15:25–22:15 Warsaw
+
+
+_fast_check_lock = threading.Lock()
+
+
+def _fast_price_and_alert_check() -> None:
+    """
+    Lekki job uruchamiany co 15 min w trakcie sesji NYSE (15:30–22:15 PL).
+    Robi tylko: sync cen + alert engine + SMS krytyczny.
+    Nie zastępuje pełnego pipeline'u — działa równolegle jako uzupełnienie.
+    """
+    if not _is_market_hours():
+        return
+
+    if not _fast_check_lock.acquire(blocking=False):
+        print("[fast-check] Poprzedni fast-check nadal trwa — pomijam.")
+        return
+
+    r = CycleReport()
+    print(f"[fast-check] Szybki sync cen + alerty ({datetime.now(timezone.utc).strftime('%H:%M UTC')})")
+
+    try:
+        with SessionLocal() as db:
+            assets = db.scalars(select(AssetORM).order_by(AssetORM.name.asc())).all()
+
+            for asset in assets:
+                _step_sync_prices(db, asset, r)
+                _step_alerts(db, asset, r)
+
+            _step_sms_critical(db, r)
+            _step_sms_portfolio_sell_urgent(db, r)
+
+        if r.assets_alerts_fired:
+            print(f"[fast-check] Alerty: {r.assets_alerts_fired}, SMS: {r.notifications_sent}, błędy: {len(r.errors)}")
+        if r.errors:
+            for e in r.errors:
+                print(f"[fast-check] ✗ {e}")
+    except Exception as exc:
+        print(f"[fast-check] BŁĄD: {exc}")
+        traceback.print_exc()
+    finally:
+        _fast_check_lock.release()
+
+
 def start_scheduler() -> None:
     if not settings.auto_sync_enabled:
         print("[scheduler] Wyłączony (AUTO_SYNC_ENABLED=false)")
@@ -520,8 +869,27 @@ def start_scheduler() -> None:
         id="portfolio-report",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _fast_price_and_alert_check,
+        "interval",
+        minutes=15,
+        id="fast-price-check",
+        replace_existing=True,
+    )
+    # News SMS wyłączone — alerty oparte na cenie/ML są precyzyjniejsze
+    # if settings.finnhub_api_key:
+    #     scheduler.add_job(_step_news_alerts, "interval", minutes=5, id="news-alerts", replace_existing=True)
+    if settings.sms_enabled:
+        scheduler.add_job(
+            _handle_sms_commands,
+            "interval",
+            minutes=5,
+            id="sms-commands",
+            replace_existing=True,
+        )
+        print("[scheduler] SMS polling co 5 min włączony")
     scheduler.start()
-    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, raport portfela pn-pt o 22:10")
+    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, fast-check co 15 min podczas sesji, raport portfela pn-pt o 22:10")
 
 
 def stop_scheduler() -> None:

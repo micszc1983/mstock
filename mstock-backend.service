@@ -1,0 +1,33 @@
+[Unit]
+Description=MStock Backend (FastAPI/uvicorn)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=tt38dn
+Group=tt38dn
+WorkingDirectory=/home/tt38dn/MStock/backend
+
+# Uruchom migracje przed startem backendu
+ExecStartPre=/home/tt38dn/MStock/backend/.venv/bin/python3 -m alembic upgrade head
+
+ExecStart=/home/tt38dn/MStock/backend/.venv/bin/uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 1
+
+# Restart po awarii (nie przy czystym stop)
+Restart=on-failure
+RestartSec=10
+
+# Logi trafiają do journald: journalctl -u mstock-backend -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mstock-backend
+
+# Zmienne środowiskowe z pliku .env
+EnvironmentFile=-/home/tt38dn/MStock/backend/.env
+
+[Install]
+WantedBy=multi-user.target

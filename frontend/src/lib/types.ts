@@ -378,6 +378,15 @@ export type AssetRecommendation = {
   put_call_ratio: number | null;
   iv_rank: number | null;
   earnings_surprise_pct: number | null;
+  last_price: number | null;
+};
+
+export type TopPick = AssetRecommendation & {
+  certainty_score: number;
+  signals_aligned: number;
+  max_signals: number;
+  aligned_labels: string[];
+  missing_labels: string[];
 };
 
 export type EarningsRecord = {

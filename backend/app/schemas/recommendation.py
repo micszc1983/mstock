@@ -69,3 +69,11 @@ class AssetRecommendation(BaseModel):
     earnings_surprise_pct: Optional[float] = None  # EPS surprise % ostatniego raportu (< 90 dni)
 
     last_price: Optional[float] = None  # ostatnia cena zamknięcia z DailyAssetFeatureORM
+
+
+class TopPick(AssetRecommendation):
+    certainty_score: float        # 0-100: ważona zbieżność wszystkich sygnałów
+    signals_aligned: int          # ile z 9 sygnałów jest zgodnych (bullish)
+    max_signals: int = 9
+    aligned_labels: list[str]     # nazwy spełnionych sygnałów
+    missing_labels: list[str]     # nazwy niespełnionych sygnałów

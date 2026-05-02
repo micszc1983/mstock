@@ -38,6 +38,7 @@ import type {
   EarningsCallAnalysis,
   InsiderTrade,
   ShortInterest,
+  TopPick,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -412,4 +413,7 @@ export const api = {
     fetchJson<{ asset_id: string; quantity: number; avg_buy_price: number | null }[]>(
       `${_activeBase}/portfolio/positions`
     ),
+
+  topPicks: () =>
+    fetchJson<TopPick[]>(`${_activeBase}/top-picks`),
 };
