@@ -1,4 +1,5 @@
 import type {
+  SmsAlertConfig,
   AggregateDashboardResponse,
   AssetCreate,
   AlertItem,
@@ -39,6 +40,8 @@ import type {
   InsiderTrade,
   ShortInterest,
   TopPick,
+  IntradayCandle,
+  IntradaySignalsResponse,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -416,4 +419,35 @@ export const api = {
 
   topPicks: () =>
     fetchJson<TopPick[]>(`${_activeBase}/top-picks`),
+
+  intradayCandles: (assetId: string, resolution = "15", limit = 200) =>
+    fetchJson<IntradayCandle[]>(
+      `${_activeBase}/assets/${assetId}/intraday/candles?resolution=${resolution}&limit=${limit}`
+    ),
+
+  intradaySignals: (assetId: string, resolution = "15") =>
+    fetchJson<IntradaySignalsResponse>(
+      `${_activeBase}/assets/${assetId}/intraday/signals?resolution=${resolution}`
+    ),
+
+  intradayRelativeStrength: (assetId: string, resolution = "15", benchmark = "qqq") =>
+    fetchJson<import("./types").RelativeStrengthData>(
+      `${_activeBase}/assets/${assetId}/intraday/relative-strength?resolution=${resolution}&benchmark=${benchmark}`
+    ),
+
+  intradayVolumeProfile: (assetId: string, resolution = "15", limit = 300) =>
+    fetchJson<import("./types").VolumeProfile>(
+      `${_activeBase}/assets/${assetId}/intraday/volume-profile?resolution=${resolution}&limit=${limit}`
+    ),
+
+  intradaySync: (assetId: string, resolution = "15") =>
+    postJson<{ asset_id: string; resolution: string; new_candles: number; fetched_from_api: number; already_in_db: number }>(
+      `${_activeBase}/assets/${assetId}/intraday/sync?resolution=${resolution}`
+    ),
+
+  smsAlertConfig: () =>
+    fetchJson<SmsAlertConfig>(`${_activeBase}/admin/sms-alert-config`),
+
+  saveSmsAlertConfig: (cfg: Partial<Omit<SmsAlertConfig, "sms_status" | "alert_rule_labels" | "alert_rule_descriptions" | "threshold_labels" | "defaults">>) =>
+    postJson<{ ok: boolean; saved: string[] }>(`${_activeBase}/admin/sms-alert-config`, cfg),
 };

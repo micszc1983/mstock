@@ -36,6 +36,20 @@ def _default_rule_map():
 
 def _get_rule_config(db: Session, alert_type: str) -> dict:
     defaults = _default_rule_map().get(alert_type, {"threshold": 1.0, "severity": "medium", "cooldown_minutes": 60})
+    # Sprawdź czy alert jest wyłączony w konfiguracji JSON
+    try:
+        from app.services.sms_alert_config import get_alert_rule
+        json_rule = get_alert_rule(alert_type)
+        if not json_rule.get("enabled", True):
+            return {**defaults, "_disabled": True}
+        # Nadpisz cooldown i threshold z JSON config jeśli są tam zdefiniowane
+        if "cooldown_minutes" in json_rule:
+            defaults = {**defaults, "cooldown_minutes": json_rule["cooldown_minutes"]}
+        if "threshold" in json_rule:
+            defaults = {**defaults, "threshold": json_rule["threshold"]}
+    except Exception:
+        pass
+    # Następnie sprawdź DB (nadpisuje JSON)
     for rule in list_alert_rules(db):
         if rule.is_enabled and rule.alert_type == alert_type:
             try:
@@ -61,7 +75,7 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
 
     # 1. fragility_high
     cfg = _get_rule_config(db, "fragility_high")
-    if latest.fragility_score >= cfg["threshold"]:
+    if not cfg.get("_disabled") and latest.fragility_score >= cfg["threshold"]:
         prev = get_recent_similar_alert(db, asset_id, "fragility_high")
         if not _within_cooldown(prev, cfg["cooldown_minutes"]):
             insert_alert(
@@ -90,7 +104,7 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
         current = history[0]
         previous = history[1]
         cfg = _get_rule_config(db, "dominant_narrative_changed")
-        if current.dominant_narrative and previous.dominant_narrative and current.dominant_narrative != previous.dominant_narrative:
+        if not cfg.get("_disabled") and current.dominant_narrative and previous.dominant_narrative and current.dominant_narrative != previous.dominant_narrative:
             prev = get_recent_similar_alert(db, asset_id, "dominant_narrative_changed")
             if not _within_cooldown(prev, cfg["cooldown_minutes"]):
                 insert_alert(
@@ -118,7 +132,7 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
     if forecasts:
         cfg = _get_rule_config(db, "forecast_downgrade")
         downish = [f for f in forecasts if f.direction == "down"]
-        if downish:
+        if not cfg.get("_disabled") and downish:
             prev = get_recent_similar_alert(db, asset_id, "forecast_downgrade")
             if not _within_cooldown(prev, cfg["cooldown_minutes"]):
                 sample = downish[0]
@@ -154,8 +168,8 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
     if len(last2_decisions) == 2:
         current_label = last2_decisions[0].action_label
         previous_label = last2_decisions[1].action_label
-        if previous_label == "KUP" and current_label == "SPRZEDAJ":
-            cfg = _get_rule_config(db, "signal_flip_kup_sprzedaj")
+        cfg = _get_rule_config(db, "signal_flip_kup_sprzedaj")
+        if not cfg.get("_disabled") and previous_label == "KUP" and current_label == "SPRZEDAJ":
             prev = get_recent_similar_alert(db, asset_id, "signal_flip_kup_sprzedaj")
             if not _within_cooldown(prev, cfg.get("cooldown_minutes", 1440)):
                 insert_alert(
@@ -187,8 +201,8 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
         price_is_fresh = last_ts is None or (now_utc() - last_ts) < timedelta(hours=36)
         if prev_close and last_close and prev_close > 0 and price_is_fresh:
             drop_pct = (last_close - prev_close) / prev_close * 100.0
-            if drop_pct < -5.0:
-                cfg = _get_rule_config(db, "price_drop_session")
+            cfg = _get_rule_config(db, "price_drop_session")
+            if not cfg.get("_disabled") and drop_pct < cfg.get("threshold", -5.0):
                 prev_alert = get_recent_similar_alert(db, asset_id, "price_drop_session")
                 if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 1440)):
                     insert_alert(
@@ -217,8 +231,8 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
         .order_by(SyncLogORM.created_at.desc())
         .limit(2)
     ).all()
-    if len(last2_syncs) >= 2 and all(s.status == "error" for s in last2_syncs):
-        cfg = _get_rule_config(db, "dead_data")
+    cfg = _get_rule_config(db, "dead_data")
+    if not cfg.get("_disabled") and len(last2_syncs) >= 2 and all(s.status == "error" for s in last2_syncs):
         prev_alert = get_recent_similar_alert(db, asset_id, "dead_data")
         if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 120)):
             insert_alert(
@@ -247,8 +261,8 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
             quality = check_asset_quality(db, asset_row)
             quality_pct = quality.overall_score * 100.0
             threshold = settings.sms_data_quality_threshold
-            if quality_pct < threshold:
-                cfg = _get_rule_config(db, "data_quality_low")
+            cfg = _get_rule_config(db, "data_quality_low")
+            if not cfg.get("_disabled") and quality_pct < threshold:
                 prev_alert = get_recent_similar_alert(db, asset_id, "data_quality_low")
                 if not _within_cooldown(prev_alert, cfg.get("cooldown_minutes", 1440)):
                     insert_alert(
@@ -281,16 +295,16 @@ def run_alert_engine(db: Session, asset_id: str) -> int:
         .order_by(MLPredictionORM.snapshot_at.desc())
         .limit(1)
     )
-    if ml_pred is not None and ml_pred.probability_up < 0.4:
+    cfg_ml = _get_rule_config(db, "ml_bearish_divergence")
+    if not cfg_ml.get("_disabled") and ml_pred is not None and ml_pred.probability_up < cfg_ml.get("threshold", 0.4):
         # Dywergencja tylko gdy heurystyki nie alarmują już same z siebie
         heuristics_not_alarming = (
             latest.fragility_score < 60
             and latest.trend_score > 40
         )
         if heuristics_not_alarming:
-            cfg = _get_rule_config(db, "ml_bearish_divergence")
             prev = get_recent_similar_alert(db, asset_id, "ml_bearish_divergence")
-            if not _within_cooldown(prev, cfg.get("cooldown_minutes", 360)):
+            if not _within_cooldown(prev, cfg_ml.get("cooldown_minutes", 360)):
                 insert_alert(
                     db=db,
                     asset_id=asset_id,

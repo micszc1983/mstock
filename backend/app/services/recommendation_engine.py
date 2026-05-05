@@ -321,15 +321,44 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     )
 
 
+import threading as _threading
+import time as _time
+
+_rec_cache: list[AssetRecommendation] = []
+_rec_cache_ts: float = 0.0
+_rec_cache_ttl: float = 90.0
+_rec_cache_lock = _threading.Lock()
+
+
+def invalidate_recommendations_cache() -> None:
+    """Wymuś odświeżenie cache przy następnym wywołaniu (np. po pełnym cyklu schedulera)."""
+    global _rec_cache_ts
+    _rec_cache_ts = 0.0
+
+
 def build_all_recommendations(db: Session) -> list[AssetRecommendation]:
-    results = []
-    for asset in list_assets(db):
-        rec = build_recommendation(db, asset.id)
-        if rec is not None:
-            results.append(rec)
-    order = {"KUP": 0, "TRZYMAJ": 1, "SPRZEDAJ": 2}
-    results.sort(key=lambda r: (order.get(r.recommendation, 1), -r.composite_score))
-    return results
+    global _rec_cache, _rec_cache_ts
+
+    now = _time.monotonic()
+    if now - _rec_cache_ts < _rec_cache_ttl and _rec_cache:
+        return _rec_cache
+
+    with _rec_cache_lock:
+        # Podwójne sprawdzenie po nabyciu locka
+        if _time.monotonic() - _rec_cache_ts < _rec_cache_ttl and _rec_cache:
+            return _rec_cache
+
+        results = []
+        for asset in list_assets(db):
+            rec = build_recommendation(db, asset.id)
+            if rec is not None:
+                results.append(rec)
+        order = {"KUP": 0, "TRZYMAJ": 1, "SPRZEDAJ": 2}
+        results.sort(key=lambda r: (order.get(r.recommendation, 1), -r.composite_score))
+
+        _rec_cache = results
+        _rec_cache_ts = _time.monotonic()
+        return results
 
 
 # ── Top Picks ─────────────────────────────────────────────────────────────────

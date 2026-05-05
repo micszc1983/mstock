@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, date
 from typing import List, Optional
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -442,6 +442,36 @@ class ShortInterestORM(Base):
     short_percent_float: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     short_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+
+
+class IntradayCandleORM(Base):
+    __tablename__ = "intraday_candles"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "resolution", "timestamp", name="uq_intraday_candle"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    resolution: Mapped[str] = mapped_column(String(8), index=True)       # "15" | "60"
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    # Wskaźniki techniczne obliczone dla tej świecy
+    rsi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ema9: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ema20: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    macd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    macd_signal: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bb_upper: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bb_lower: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # vol / avg20vol
+    vwap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # Volume Weighted Avg Price (reset per day)
+    adx: Mapped[Optional[float]] = mapped_column(Float, nullable=True)           # Average Directional Index (trend strength)
+    di_plus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # +DI (directional movement up)
+    di_minus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)      # -DI (directional movement down)
 
 
 class EarningsCallAnalysisORM(Base):

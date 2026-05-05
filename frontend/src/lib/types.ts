@@ -527,3 +527,127 @@ export type ShortInterest = {
   short_ratio: number | null;
   created_at: string;
 };
+
+export type AlertRuleConfig = {
+  enabled: boolean;
+  threshold?: number;
+  cooldown_minutes: number;
+};
+
+export type SmsAlertConfig = {
+  sms_status: {
+    enabled: boolean;
+    port: string;
+    recipient: string;
+    finnhub_configured: boolean;
+  };
+  alert_rules: Record<string, AlertRuleConfig>;
+  top_picks_sms: { enabled: boolean };
+  portfolio_sell_urgent: { enabled: boolean; cooldown_minutes: number };
+  premarket_gap: {
+    enabled: boolean;
+    portfolio_threshold_pct: number;
+    watchlist_threshold_pct: number;
+  };
+  alert_rule_labels: Record<string, string>;
+  alert_rule_descriptions: Record<string, string>;
+  threshold_labels: Record<string, string>;
+  defaults: Record<string, unknown>;
+};
+
+export type IntradayCandle = {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  rsi: number | null;
+  ema9: number | null;
+  ema20: number | null;
+  macd: number | null;
+  macd_signal: number | null;
+  bb_upper: number | null;
+  bb_lower: number | null;
+  volume_ratio: number | null;
+  vwap: number | null;
+};
+
+export type SwingSignal = {
+  type: "BUY" | "SELL";
+  timestamp: string;
+  price: number;
+  strength: number;
+  reasons: string[];
+  rsi: number | null;
+  volume_ratio: number | null;
+  vwap: number | null;
+};
+
+export type RSDataPoint = {
+  timestamp: string;
+  rs: number;
+  asset_ret: number;
+  bench_ret: number;
+};
+
+export type RelativeStrengthData = {
+  data: RSDataPoint[];
+  benchmark: string;
+  current_rs: number | null;
+};
+
+export type VPBin = {
+  price: number;
+  volume: number;
+  pct: number;
+  is_poc: boolean;
+  in_va: boolean;
+};
+
+export type VolumeProfile = {
+  poc: number;
+  vah: number;
+  val: number;
+  price_low: number;
+  price_high: number;
+  total_volume: number;
+  bins: VPBin[];
+};
+
+export type OpeningRange = {
+  high: number;
+  low: number;
+  breakout_up: boolean;
+  breakout_down: boolean;
+  range_pct: number;
+};
+
+export type CandlePattern = {
+  name: string;
+  type: "bullish" | "bearish" | "neutral";
+  timestamp: string;
+  price: number;
+  description: string;
+  strength: number;
+};
+
+export type MarketRegime = {
+  regime: "trend_up" | "trend_down" | "range" | "volatile" | "unknown";
+  adx: number | null;
+  di_plus: number | null;
+  di_minus: number | null;
+  bb_squeeze: boolean;
+  description: string;
+};
+
+export type IntradaySignalsResponse = {
+  signals: SwingSignal[];
+  patterns: CandlePattern[];
+  support: number[];
+  resistance: number[];
+  candles_count: number;
+  opening_range: OpeningRange | Record<string, never>;
+  current_vwap: number | null;
+  regime: MarketRegime;
+};

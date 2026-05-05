@@ -26,6 +26,8 @@ from app.api.routes.ensemble import router as ensemble_router
 from app.api.routes.recommendations import router as recommendations_router
 from app.api.routes.earnings import router as earnings_router
 from app.api.routes.insider import router as insider_router
+from app.api.routes.intraday import router as intraday_router
+from app.api.routes.sms_config import router as sms_config_router
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.repositories.assets import list_assets
@@ -166,6 +168,47 @@ async def lifespan(app: FastAPI):
             print("[startup] migracja: tabela short_interest gotowa")
         except Exception:
             pass
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS intraday_candles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
+                    resolution VARCHAR(8) NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    open FLOAT NOT NULL,
+                    high FLOAT NOT NULL,
+                    low FLOAT NOT NULL,
+                    close FLOAT NOT NULL,
+                    volume FLOAT NOT NULL,
+                    rsi FLOAT,
+                    ema9 FLOAT,
+                    ema20 FLOAT,
+                    macd FLOAT,
+                    macd_signal FLOAT,
+                    bb_upper FLOAT,
+                    bb_lower FLOAT,
+                    volume_ratio FLOAT,
+                    CONSTRAINT uq_intraday_candle UNIQUE (asset_id, resolution, timestamp)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_asset_id ON intraday_candles(asset_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_resolution ON intraday_candles(resolution)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_timestamp ON intraday_candles(timestamp)"))
+            print("[startup] migracja: tabela intraday_candles gotowa")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN vwap FLOAT"))
+            print("[startup] migracja: kolumna vwap dodana do intraday_candles")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN adx FLOAT"))
+            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN di_plus FLOAT"))
+            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN di_minus FLOAT"))
+            print("[startup] migracja: kolumny adx/di_plus/di_minus dodane do intraday_candles")
+        except Exception:
+            pass
 
     print("[startup] tabele DB gotowe")
 
@@ -297,6 +340,8 @@ app.include_router(ensemble_router)
 app.include_router(recommendations_router)
 app.include_router(earnings_router)
 app.include_router(insider_router)
+app.include_router(intraday_router)
+app.include_router(sms_config_router)
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,8 @@ import { ColTip } from "./components/Tip";
 import { PageContainer, Section } from "./components/Layout";
 import { MetaRow, Panel, Pill } from "./components/Panel";
 import { Portfolio } from "./components/Portfolio";
+import { IntradayTab } from "./components/IntradayTab";
+import { AlertsConfigTab } from "./components/AlertsConfigTab";
 
 function humanizeError(message: string) {
   const lower = message.toLowerCase();
@@ -100,7 +102,7 @@ export default function App() {
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider" | "toppicks">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider" | "toppicks" | "intraday" | "alerts-config">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -236,7 +238,7 @@ export default function App() {
     setInfo("");
 
     try {
-      // ── Faza 1: dane krytyczne — renderuje UI jak najszybciej ──────────────
+      // ── Faza 1: dane kluczowe — renderuje UI jak najszybciej ─────────────────
       const [
         thesis,
         forecasts,
@@ -250,8 +252,6 @@ export default function App() {
         wl,
         currentMlStatus,
         currentMlPrediction,
-        currentMlExplanation,
-        currentRecommendations,
         currentPriceHistory,
         currentEnsembleSignal,
         notificationChannels,
@@ -269,8 +269,6 @@ export default function App() {
         api.watchlists().catch(() => []),
         api.mlStatus().catch(() => null),
         api.latestMlPrediction(selectedAsset, mlActiveTarget).catch(() => null),
-        api.mlExplain(selectedAsset, mlActiveTarget).catch(() => null),
-        api.recommendations().catch(() => []),
         api.priceHistory(selectedAsset, 365).catch(() => []),
         api.ensembleSignal(selectedAsset, ensembleMode).catch(() => null),
         api.notificationChannels().catch(() => []),
@@ -289,8 +287,6 @@ export default function App() {
       setWatchlists(wl);
       setMlStatus(currentMlStatus);
       setMlPrediction(currentMlPrediction);
-      setMlExplanation(currentMlExplanation);
-      setRecommendations(currentRecommendations);
       setPriceHistory(currentPriceHistory);
       setEnsembleSignal(currentEnsembleSignal);
       setChannels(notificationChannels);
@@ -317,6 +313,8 @@ export default function App() {
         currentInsiderTrades,
         currentShortInterest,
         currentTopPicks,
+        currentRecommendations,
+        currentMlExplanation,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
         api.mlModels().catch(() => []),
@@ -338,6 +336,8 @@ export default function App() {
         api.insiderTrades(selectedAsset).catch(() => []),
         api.shortInterest(selectedAsset).catch(() => []),
         api.topPicks().catch(() => []),
+        api.recommendations().catch(() => []),
+        api.mlExplain(selectedAsset, mlActiveTarget).catch(() => null),
       ]);
 
       setEvents(notificationEvents);
@@ -357,6 +357,8 @@ export default function App() {
       setInsiderTrades(currentInsiderTrades);
       setShortInterest(currentShortInterest);
       setTopPicks(currentTopPicks);
+      setRecommendations(currentRecommendations);
+      setMlExplanation(currentMlExplanation);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
       setLoading(false);
@@ -769,7 +771,7 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["toppicks", "⭐ Top Picks"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["toppicks", "⭐ Top Picks"], ["intraday", "📈 Intraday"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"], ["alerts-config", "🔔 Alerty SMS"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -3271,6 +3273,16 @@ async function notifyFirstEmail() {
             </div>
           )}
         </Section>
+      )}
+
+      {/* ── Zakładka Intraday ─────────────────────────────────────────────── */}
+      {activeTab === "intraday" && (
+        <IntradayTab assets={assets} />
+      )}
+
+      {/* ── Zakładka Alerty SMS ───────────────────────────────────────────── */}
+      {activeTab === "alerts-config" && (
+        <AlertsConfigTab />
       )}
 
     </PageContainer>

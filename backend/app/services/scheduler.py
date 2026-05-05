@@ -332,6 +332,12 @@ def _step_sms_new_top_pick(db, r: CycleReport) -> None:
     if not settings.sms_enabled:
         return
     try:
+        from app.services.sms_alert_config import get_section
+        if not get_section("top_picks_sms").get("enabled", True):
+            return
+    except Exception:
+        pass
+    try:
         from app.services.recommendation_engine import build_top_picks
         from app.services.sms_service import send_sms
 
@@ -383,7 +389,14 @@ def _step_sms_portfolio_sell_urgent(db, r: CycleReport) -> None:
         from app.services.sms_service import send_sms
         from app.utils.datetime import ensure_utc, now_utc
 
-        COOLDOWN_MIN = 360  # 6 godzin między kolejnymi SMS dla tego samego aktywa
+        try:
+            from app.services.sms_alert_config import get_section as _gs
+            _psu = _gs("portfolio_sell_urgent")
+            if not _psu.get("enabled", True):
+                return
+            COOLDOWN_MIN = int(_psu.get("cooldown_minutes", 360))
+        except Exception:
+            COOLDOWN_MIN = 360
 
         positions = [p for p in list_positions(db) if p.quantity > 0]
         for pos in positions:
@@ -533,6 +546,12 @@ def run_periodic_sync() -> None:
         traceback.print_exc()
     finally:
         r.finished_at = datetime.now(timezone.utc)
+        # Inwaliduj cache rekomendacji — dane zostały właśnie zaktualizowane
+        try:
+            from app.services.recommendation_engine import invalidate_recommendations_cache
+            invalidate_recommendations_cache()
+        except Exception:
+            pass
         print(f"[scheduler] ═══ {r.summary()} ═══\n")
         scheduler_lock.release()
 
@@ -805,6 +824,192 @@ def _is_market_hours() -> bool:
 
 
 _fast_check_lock = threading.Lock()
+_intraday_lock = threading.Lock()
+
+# ── Pre-market gap alert ──────────────────────────────────────────────────────
+
+# Klucz: asset_id → data (str "YYYY-MM-DD") ostatniego alertu
+_premarket_alerted_today: dict[str, str] = {}
+
+
+def _is_premarket_hours() -> bool:
+    """Zwraca True w dni robocze 10:00–15:25 Warsaw (= NYSE pre-market 4:00–9:30 ET)."""
+    from zoneinfo import ZoneInfo
+    now_pl = datetime.now(ZoneInfo("Europe/Warsaw"))
+    if now_pl.weekday() >= 5:
+        return False
+    minutes = now_pl.hour * 60 + now_pl.minute
+    return 10 * 60 <= minutes <= 15 * 60 + 25
+
+
+def _fetch_premarket_quote(symbol: str) -> dict | None:
+    """Pobiera quote z Finnhub: current price, prev close, % change."""
+    import httpx
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                "https://finnhub.io/api/v1/quote",
+                params={"symbol": symbol.upper(), "token": settings.finnhub_api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("c") and data.get("pc"):
+            return data
+    except Exception as exc:
+        print(f"[premarket] błąd Finnhub quote {symbol}: {exc}")
+    return None
+
+
+def _premarket_gap_check() -> None:
+    """
+    Co 15 min podczas pre-market (10:00–15:25 Warsaw) sprawdza lukę cenową
+    dla aktywów z portfela i watchlist.
+    SMS wysyłany gdy |gap| >= 3% (portfel) lub >= 5% (watchlist).
+    Jeden alert per aktywo per dzień.
+    """
+    if not settings.sms_enabled or not settings.finnhub_api_key:
+        return
+    if not _is_premarket_hours():
+        return
+    try:
+        from app.services.sms_alert_config import get_section as _gs
+        _pm_cfg = _gs("premarket_gap")
+        if not _pm_cfg.get("enabled", True):
+            return
+    except Exception:
+        _pm_cfg = {"portfolio_threshold_pct": 3.0, "watchlist_threshold_pct": 5.0}
+
+    from zoneinfo import ZoneInfo
+    today_str = datetime.now(ZoneInfo("Europe/Warsaw")).strftime("%Y-%m-%d")
+
+    try:
+        from app.repositories.assets import get_asset
+        from app.repositories.portfolio_positions import list_positions
+        from app.repositories.watchlists import list_watchlists, list_watchlist_assets
+        from app.services.sms_service import send_sms
+        import time as _time
+
+        with SessionLocal() as db:
+            portfolio_ids: set[str] = set()
+            for pos in list_positions(db):
+                if pos.quantity > 0:
+                    portfolio_ids.add(pos.asset_id)
+
+            watchlist_ids: set[str] = set()
+            for wl in list_watchlists(db):
+                for aid in list_watchlist_assets(db, wl.id):
+                    watchlist_ids.add(aid)
+
+            # Zbierz wszystkie unikalne stock assets
+            all_ids = portfolio_ids | watchlist_ids
+            candidates: list[tuple[str, str, float]] = []  # (asset_id, symbol, threshold)
+            for aid in all_ids:
+                asset = get_asset(db, aid)
+                if asset is None or asset.type != "stock":
+                    continue
+                symbol = (asset.price_symbol or asset.symbol or "").upper()
+                if not symbol:
+                    continue
+                threshold = float(_pm_cfg.get("portfolio_threshold_pct", 3.0)) if aid in portfolio_ids else float(_pm_cfg.get("watchlist_threshold_pct", 5.0))
+                candidates.append((aid, symbol, threshold))
+
+        if not candidates:
+            return
+
+        sent_count = 0
+        for i, (asset_id, symbol, threshold) in enumerate(candidates):
+            if i > 0:
+                _time.sleep(0.3)  # Finnhub rate limit
+
+            # Już wysłano alert dla tego aktywa dziś?
+            if _premarket_alerted_today.get(asset_id) == today_str:
+                continue
+
+            quote = _fetch_premarket_quote(symbol)
+            if quote is None:
+                continue
+
+            current = quote["c"]
+            prev_close = quote["pc"]
+            gap_pct = (current - prev_close) / prev_close * 100
+
+            if abs(gap_pct) < threshold:
+                continue
+
+            direction = "+" if gap_pct > 0 else ""
+            msg = (
+                f"MStock PRE-MARKET: {symbol} {direction}{gap_pct:.1f}% przed sesja. "
+                f"Cena: {current:.2f} USD (zamkniecie: {prev_close:.2f})"
+            )
+            ok = send_sms(msg)
+            _premarket_alerted_today[asset_id] = today_str
+
+            tag = "portfel" if asset_id in portfolio_ids else "watchlist"
+            status = "✓" if ok else "✗"
+            print(f"[premarket] {status} SMS gap {symbol}: {direction}{gap_pct:.1f}% [{tag}]")
+            if ok:
+                sent_count += 1
+
+        if sent_count:
+            print(f"[premarket] Wysłano {sent_count} alertów gap")
+
+    except Exception as exc:
+        print(f"[premarket] BŁĄD: {exc}")
+        import traceback as _tb
+        _tb.print_exc()
+
+
+_intraday_sms_sent: dict[str, str] = {}  # asset_id -> "BUY/SELL@timestamp"
+
+
+def _sync_intraday_job() -> None:
+    """Sync świec intraday dla wszystkich stocks — uruchamiany co 15 min podczas sesji NYSE."""
+    if not _is_market_hours():
+        return
+    if not _intraday_lock.acquire(blocking=False):
+        return
+    try:
+        from app.services.intraday_service import sync_all_intraday, get_latest_signals
+        from app.services.sms_alert_config import get_section
+        with SessionLocal() as db:
+            results = sync_all_intraday(db, resolutions=["15", "60"])
+            if results:
+                total = sum(results.values())
+                print(f"[intraday-sync] Nowe świece: {total} dla {len(results)} aktywów")
+                # SMS dla silnych sygnałów intraday (tylko gdy są nowe świece)
+                intraday_cfg = get_section("intraday_sms")
+                if intraday_cfg.get("enabled", True):
+                    min_strength = intraday_cfg.get("min_strength", 60)
+                    _check_intraday_sms(db, results, min_strength, get_latest_signals)
+    except Exception as exc:
+        print(f"[intraday-sync] BŁĄD: {exc}")
+    finally:
+        _intraday_lock.release()
+
+
+def _check_intraday_sms(db, updated_assets: dict, min_strength: int, get_latest_signals_fn) -> None:
+    """Sprawdza sygnały intraday i wysyła SMS gdy siła >= min_strength."""
+    today = _dt.date.today().isoformat()
+    for asset_id in updated_assets:
+        try:
+            data = get_latest_signals_fn(db, asset_id, resolution="15")
+            for sig in data.get("signals", []):
+                if sig["strength"] < min_strength:
+                    continue
+                key = f"{asset_id}:{sig['type']}:{today}"
+                if key in _intraday_sms_sent:
+                    continue
+                _intraday_sms_sent[key] = sig["timestamp"]
+                reasons_str = ", ".join(sig["reasons"][:3])
+                msg = (
+                    f"INTRADAY {sig['type']} {asset_id.upper()}\n"
+                    f"Cena: ${sig['price']:.2f} | Sila: {sig['strength']}%\n"
+                    f"{reasons_str}"
+                )
+                _send_sms(msg)
+                print(f"[intraday-sms] {sig['type']} {asset_id} strength={sig['strength']}")
+        except Exception as exc:
+            print(f"[intraday-sms] blad {asset_id}: {exc}")
 
 
 def _fast_price_and_alert_check() -> None:
@@ -876,6 +1081,24 @@ def start_scheduler() -> None:
         id="fast-price-check",
         replace_existing=True,
     )
+    if settings.finnhub_api_key:
+        scheduler.add_job(
+            _sync_intraday_job,
+            "interval",
+            minutes=15,
+            id="intraday-sync",
+            replace_existing=True,
+        )
+        print("[scheduler] Intraday sync co 15 min (tylko podczas sesji NYSE)")
+    if settings.sms_enabled and settings.finnhub_api_key:
+        scheduler.add_job(
+            _premarket_gap_check,
+            "interval",
+            minutes=15,
+            id="premarket-gap",
+            replace_existing=True,
+        )
+        print("[scheduler] Pre-market gap alert co 15 min (10:00–15:25 Warsaw)")
     # News SMS wyłączone — alerty oparte na cenie/ML są precyzyjniejsze
     # if settings.finnhub_api_key:
     #     scheduler.add_job(_step_news_alerts, "interval", minutes=5, id="news-alerts", replace_existing=True)
