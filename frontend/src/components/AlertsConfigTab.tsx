@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api } from "../lib/api";
+import { adminHeaders, api } from "../lib/api";
 import type { SmsAlertConfig, AlertRuleConfig } from "../lib/types";
 
 const S = {
@@ -132,7 +132,7 @@ export function AlertsConfigTab() {
     setTestingSms(true);
     setMsg(null);
     try {
-      const r = await fetch(`${api.apiBase}/admin/test-sms`, { method: "POST" });
+      const r = await fetch(`${api.apiBase}/admin/test-sms`, { method: "POST", headers: adminHeaders() });
       const d = await r.json();
       if (d.sent) setMsg({ type: "ok", text: `SMS testowy wysłany na ${d.recipient}` });
       else setMsg({ type: "err", text: d.reason || "SMS niewyslany" });

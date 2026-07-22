@@ -41,9 +41,14 @@ def _calc_momentum_20d(prices) -> float:
 
 
 
-def _news_count_7d(news) -> int:
-    cutoff = now_utc() - timedelta(days=7)
-    return sum(1 for item in news if ensure_utc(item.published_at) >= cutoff)
+def _news_count_7d(news, at: datetime | None = None) -> int:
+    """Count news in the seven days known at ``at`` (safe for backfills)."""
+    anchor = ensure_utc(at) if at is not None else now_utc()
+    cutoff = anchor - timedelta(days=7)
+    return sum(
+        1 for item in news
+        if cutoff < ensure_utc(item.published_at) <= anchor
+    )
 
 
 def _calc_iv_rank(db: Session, asset_id: str, current_iv: float | None) -> float | None:
@@ -80,7 +85,8 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
     # Dane opcyjne — tylko dla bieżącego snapshotu (historyczne IV niedostępne za darmo)
     from app.services.providers import fetch_options_data
     options_symbol = asset_row.price_symbol or asset.symbol
-    opts = fetch_options_data(options_symbol)
+    from app.core.config import settings
+    opts = {} if settings.testing else fetch_options_data(options_symbol)
     iv = opts.get("implied_volatility")
     pc = opts.get("put_call_ratio")
     iv_r = _calc_iv_rank(db, asset.id, iv)
@@ -137,7 +143,10 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
     # Aktualizuj predykcje ML po przebudowie features, żeby rekomendacje były spójne
     try:
         from app.services.ml_foundation import score_asset
-        for target in ("target_up_5d", "target_up_20d", "target_thesis_success"):
+        for target in (
+            "target_up_5d", "target_up_20d", "target_thesis_success",
+            "target_triple_barrier", "target_meta_label",
+        ):
             score_asset(db, asset.id, target)
     except Exception as _exc:
         pass  # brak modelu dla aktywa — nie przerywaj
@@ -223,7 +232,7 @@ def backfill_feature_history(db: Session, asset_row: AssetORM, days_back: int = 
             dominant_narrative=overview.dominant_narrative,
             volatility_10d=_calc_volatility_10d(window),
             momentum_20d=_calc_momentum_20d(window),
-            news_count_7d=_news_count_7d(news_window),
+            news_count_7d=_news_count_7d(news_window, snap_ts),
         )
         insert_feature_snapshot(db, snapshot)
         existing_dates.add(snap_date)

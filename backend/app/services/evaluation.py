@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from statistics import mean
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -39,10 +40,12 @@ def run_walkforward_backtest(db: Session, target_name: str = "target_up_5d", ass
     per_model_results: dict[str, list[dict]] = {m: [] for m in models_to_test}
     ensemble_results: list[dict] = []
 
+    horizon_gap = 20 if target_name == "target_up_20d" else 5
     for split_end in range(window, len(rows) - step + 1, step):
-        train_rows = rows[:split_end]
+        # Embargo usuwa z treningu etykiety, których horyzont nachodzi na test.
+        train_rows = rows[:max(0, split_end - horizon_gap)]
         test_rows = rows[split_end:split_end + step]
-        if not test_rows:
+        if len(train_rows) < 20 or not test_rows:
             continue
 
         feature_names = list(_json.loads(train_rows[0].feature_json).keys())
@@ -131,75 +134,77 @@ def compare_heuristic_vs_ml_for_asset(db: Session, asset_id: str):
     Porównuje heurystykę z ML ensemble na historycznych outcomeach.
     Używa wszystkich aktywnych modeli (per-asset + globalnych) przez registry.
     """
-    outcomes_list = list_outcomes_for_asset(db, asset_id, limit=300)
-    feature  = get_latest_feature_snapshot(db, asset_id)
-    decision = get_latest_decision_snapshot(db, asset_id)
-
-    if feature is None or decision is None or not outcomes_list:
-        raise ValueError("Not enough data to compare heuristic vs ML")
-
-    # Filtruj historyczne wyniki dla horyzontu 5d
-    outcomes_5d = [o for o in outcomes_list if o.horizon == "5d"]
-    sample_size = len(outcomes_5d) if outcomes_5d else len(outcomes_list)
-
-    # Heurystyka: accuracy i avg_return liczone po całej historii outcomes
-    if outcomes_5d:
-        heuristic_accuracy = sum(1 for o in outcomes_5d if o.was_directionally_correct) / len(outcomes_5d)
-        heuristic_avg_return = sum(o.realized_return_pct for o in outcomes_5d) / len(outcomes_5d)
-    else:
-        heuristic_accuracy = 0.0
-        heuristic_avg_return = 0.0
-
-    # Potrzebne do wyboru better_mode i ML
-    outcomes = {row.horizon: row for row in outcomes_list}
-    actual_up_5d = 1 if ("5d" in outcomes and outcomes["5d"].realized_return_pct > 0) else 0
-
-    # ML ensemble: zbierz per-asset + globalny, uśrednij
-    ml_accuracy   = 0.0
-    ml_avg_return = 0.0
-    better_mode   = "heuristic"
-
     target_name = "target_up_5d"
     per_asset = get_all_active_model_runs(db, target_name, asset_id=asset_id)
     global_runs = get_all_active_model_runs(db, target_name, asset_id=None)
     per_asset_names = {r.model_name for r in per_asset}
     active_runs = list(per_asset) + [r for r in global_runs if r.model_name not in per_asset_names]
 
-    if active_runs:
-        try:
-            import json as _json
-            hist = list_training_rows_for_target(db, target_name, asset_id=asset_id, limit=100)
-            if not hist:
-                hist = list_training_rows_for_target(db, target_name, asset_id=None, limit=100)
-            if not hist:
-                raise ValueError("brak danych treningowych dla feature vector")
+    if not active_runs:
+        raise ValueError("No active ML model for comparison")
 
-            # Filtruj wiersze z etykietą i zwrotem
-            labeled = [r for r in hist if r.target_up_5d is not None and r.target_return_5d is not None]
-            if labeled:
-                correct_ml = 0
-                returns_ml = []
-                for row in labeled:
-                    X_row = [_json.loads(row.feature_json)]
-                    row_probs = []
-                    for run in active_runs:
-                        try:
-                            p = predict_proba_single(run.model_name, run.model_path, X_row)
-                            row_probs.append(p)
-                        except Exception:
-                            pass
-                    if row_probs:
-                        row_prob = float(mean(row_probs))
-                        if (row_prob >= 0.5) == bool(row.target_up_5d):
-                            correct_ml += 1
-                        returns_ml.append(row.target_return_5d)
-                if returns_ml:
-                    ml_accuracy = correct_ml / len(returns_ml)
-                    ml_avg_return = sum(returns_ml) / len(returns_ml)
-                    better_mode = "ml" if (ml_accuracy > heuristic_accuracy or
-                                           (ml_accuracy == heuristic_accuracy and ml_avg_return > heuristic_avg_return)) else "heuristic"
-        except Exception:
-            pass
+    # Każdy porównywany rekord musi być późniejszy od treningu wszystkich modeli.
+    from app.utils.datetime import ensure_utc
+    cutoffs = []
+    valid_runs = []
+    for run in active_runs:
+        try:
+            metadata = json.loads(run.metrics_json)
+            cutoffs.append(ensure_utc(datetime.fromisoformat(metadata["train_end"])))
+            valid_runs.append(run)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not valid_runs:
+        raise ValueError("Active models lack temporal holdout metadata; retrain first")
+    common_cutoff = max(cutoffs)
+
+    hist = list_training_rows_for_target(db, target_name, asset_id=asset_id, limit=1000)
+    labeled = [r for r in hist if ensure_utc(r.snapshot_at) > common_cutoff and r.target_return_5d is not None]
+    if not labeled:
+        raise ValueError("No common out-of-sample rows for comparison")
+
+    # Outcome heurystyki powiązany z dokładnie tym samym snapshotem i horyzontem.
+    from sqlalchemy import select, func
+    from app.db.models import ThesisORM, ThesisOutcomeORM
+    outcome_rows = db.execute(
+        select(ThesisORM.source_snapshot_at, ThesisOutcomeORM)
+        .join(ThesisOutcomeORM, ThesisOutcomeORM.thesis_id == ThesisORM.id)
+        .where(ThesisORM.asset_id == asset_id, ThesisOutcomeORM.horizon == "5d")
+    ).all()
+    heuristic_by_date = {source.date(): outcome for source, outcome in outcome_rows}
+
+    ml_correct = 0
+    ml_returns = []
+    heuristic_correct = 0
+    heuristic_returns = []
+    for training_row in labeled:
+        heuristic = heuristic_by_date.get(training_row.snapshot_at.date())
+        if heuristic is None:
+            continue
+        probabilities = []
+        features = [json.loads(training_row.feature_json)]
+        for run in valid_runs:
+            try:
+                probabilities.append(predict_proba_single(run.model_name, run.model_path, features))
+            except Exception:
+                continue
+        if not probabilities:
+            continue
+        predicts_up = mean(probabilities) >= 0.5
+        actual_return = float(training_row.target_return_5d)
+        ml_correct += int(predicts_up == (actual_return > 0))
+        ml_returns.append(actual_return if predicts_up else -actual_return)
+        heuristic_correct += int(heuristic.was_directionally_correct)
+        heuristic_returns.append(abs(actual_return) if heuristic.was_directionally_correct else -abs(actual_return))
+
+    sample_size = len(ml_returns)
+    if sample_size == 0:
+        raise ValueError("No aligned out-of-sample observations for comparison")
+    ml_accuracy = ml_correct / sample_size
+    heuristic_accuracy = heuristic_correct / sample_size
+    ml_avg_return = mean(ml_returns)
+    heuristic_avg_return = mean(heuristic_returns)
+    better_mode = "ml" if (ml_accuracy, ml_avg_return) > (heuristic_accuracy, heuristic_avg_return) else "heuristic"
 
     row = insert_strategy_comparison(
         db=db,

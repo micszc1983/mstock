@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { RefreshCw, Wrench, Moon, Sun, Database, Cpu, Timer, Play } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { RefreshCw, Wrench, Moon, Sun, Database, Cpu, Timer, Play, Search, ChevronDown } from "lucide-react";
 import type { Asset, AssetRecommendation, MLModelRun, MLStatus } from "../lib/types";
 
 type Props = {
@@ -30,8 +30,6 @@ type ProviderState = {
   errors_24h: number;
 };
 type ProvidersStatus = Record<"massive" | "twelvedata" | "rapidapi" | "alphavantage" | "finnhub", ProviderState>;
-
-type AssetSignal = "green" | "red" | "neutral";
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +129,36 @@ function useProviderStatus(apiBase: string, syncCounter?: number) {
   return status;
 }
 
+function useIntradaySignals(apiBase: string, assets: Asset[]) {
+  const [intradayMap, setIntradayMap] = useState<Map<string, "BUY" | "SELL" | null>>(new Map());
+  useEffect(() => {
+    const stockIds = assets.filter(a => a.type === "stock").map(a => a.id);
+    if (stockIds.length === 0) return;
+    async function fetchAll() {
+      const results = await Promise.all(
+        stockIds.map(async id => {
+          try {
+            const r = await fetch(`${apiBase}/assets/${id}/intraday/signals?resolution=15`);
+            if (!r.ok) return [id, null] as const;
+            const d = await r.json();
+            const sigs: Array<{ type: string; strength: number }> = d.signals ?? [];
+            if (sigs.some(s => s.type === "BUY" && s.strength >= 0.6)) return [id, "BUY"] as const;
+            if (sigs.some(s => s.type === "SELL" && s.strength >= 0.6)) return [id, "SELL"] as const;
+            return [id, null] as const;
+          } catch {
+            return [id, null] as const;
+          }
+        })
+      );
+      setIntradayMap(new Map(results));
+    }
+    fetchAll();
+    const id = setInterval(fetchAll, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [apiBase, assets]);
+  return intradayMap;
+}
+
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 
@@ -149,7 +177,19 @@ function useMarketCountdowns() {
     const open = openH * 3600 + openM * 60;
     const close = closeH * 3600 + closeM * 60;
     const isOpen = !isWeekend && cur >= open && cur < close;
-    return { isOpen, secsLeft: isOpen ? close - cur : null };
+
+    let secsToOpen: number | null = null;
+    if (!isOpen) {
+      if (!isWeekend && cur < open) {
+        secsToOpen = open - cur;
+      } else {
+        // Po zamknięciu lub weekend — do otwarcia następnego dnia roboczego
+        const daysToNext = day === 5 ? 3 : day === 6 ? 2 : 1;
+        secsToOpen = daysToNext * 24 * 3600 - cur + open;
+      }
+    }
+
+    return { isOpen, secsLeft: isOpen ? close - cur : null, secsToOpen };
   }
 
   return {
@@ -168,10 +208,12 @@ function formatSessionTime(secs: number | null): string {
   return `${s}s`;
 }
 
-function SessionChip({ label, info }: { label: string; info: { isOpen: boolean; secsLeft: number | null } }) {
+function SessionChip({ label, info }: { label: string; info: { isOpen: boolean; secsLeft: number | null; secsToOpen: number | null } }) {
+  const title = info.isOpen
+    ? `Sesja ${label} otwarta — za ${formatSessionTime(info.secsLeft)} zamknięcie`
+    : `Sesja ${label} zamknięta — otwiera za ${formatSessionTime(info.secsToOpen)}`;
   return (
-    <div title={info.isOpen ? `Sesja ${label} otwarta — za ${formatSessionTime(info.secsLeft)} zamknięcie` : `Sesja ${label} zamknięta`}
-      style={{ display: "flex", alignItems: "center", gap: 3, cursor: "default" }}>
+    <div title={title} style={{ display: "flex", alignItems: "center", gap: 3, cursor: "default" }}>
       <span style={{
         width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
         background: info.isOpen ? "var(--ok)" : "var(--text-3)",
@@ -182,7 +224,7 @@ function SessionChip({ label, info }: { label: string; info: { isOpen: boolean; 
         color: info.isOpen ? "var(--text-1)" : "var(--text-3)",
         fontVariantNumeric: "tabular-nums",
       }}>
-        {label}{info.isOpen ? ` ${formatSessionTime(info.secsLeft)}` : ""}
+        {label}{info.isOpen ? ` ${formatSessionTime(info.secsLeft)}` : info.secsToOpen ? ` za ${formatSessionTime(info.secsToOpen)}` : ""}
       </span>
     </div>
   );
@@ -281,6 +323,97 @@ function ProviderDot({ name, label, state }: { name: string; label: string; stat
   );
 }
 
+function assetSignal(
+  recommendation: AssetRecommendation | undefined,
+  intraday: "BUY" | "SELL" | null | undefined,
+) {
+  const state = recommendation?.recommendation === "KUP" ? "🟢"
+    : recommendation?.recommendation === "SPRZEDAJ" ? "🔴"
+    : recommendation?.meta_gate_applied ? "⛔"
+    : recommendation ? "🟡" : "⚪";
+  const direction = recommendation?.forecast_dir_5d ?? recommendation?.ml_prediction;
+  const forecast = direction === "up" ? "↗" : direction === "down" ? "↘" : "→";
+  const intradayIcon = intraday === "BUY" ? "▲" : intraday === "SELL" ? "▼" : "";
+  return { state, forecast, intradayIcon };
+}
+
+function AssetPicker({
+  assets, selectedAsset, setSelectedAsset, recommendations, intradaySignals,
+}: {
+  assets: Asset[];
+  selectedAsset: string;
+  setSelectedAsset: (value: string) => void;
+  recommendations: AssetRecommendation[];
+  intradaySignals: Map<string, "BUY" | "SELL" | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const root = useRef<HTMLDivElement>(null);
+  const recMap = new Map(recommendations.map(rec => [rec.asset_id, rec]));
+  const selected = assets.find(asset => asset.id === selectedAsset);
+  const selectedSignal = assetSignal(recMap.get(selectedAsset), intradaySignals.get(selectedAsset));
+
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+
+  const normalized = query.trim().toLocaleLowerCase("pl-PL");
+  const filtered = assets.filter(asset => !normalized ||
+    `${asset.symbol} ${asset.name}`.toLocaleLowerCase("pl-PL").includes(normalized));
+  const groups = [
+    ["ETF", filtered.filter(a => a.type === "stock" && a.sector?.startsWith("ETF"))],
+    ["Spółki zagraniczne", filtered.filter(a => a.type === "stock" && a.currency !== "PLN" && !a.sector?.startsWith("ETF"))],
+    ["Spółki polskie (GPW)", filtered.filter(a => a.type === "stock" && a.currency === "PLN" && !a.sector?.startsWith("ETF"))],
+    ["Surowce", filtered.filter(a => a.type !== "stock")],
+  ] as const;
+
+  return (
+    <div className="asset-picker" ref={root}>
+      <button className="asset-picker-trigger" onClick={() => setOpen(value => !value)} aria-expanded={open}>
+        <span>{selectedSignal.state}</span>
+        <span className="asset-picker-forecast">{selectedSignal.forecast}{selectedSignal.intradayIcon}</span>
+        <strong>{selected?.symbol ?? selectedAsset}</strong>
+        <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="asset-picker-panel">
+          <div className="asset-picker-search">
+            <Search size={15} />
+            <input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="Szukaj symbolu lub nazwy…" />
+          </div>
+          <div className="asset-picker-legend">🟢 kup · 🔴 sprzedaj · 🟡 neutralnie · ⛔ meta blokada · ↗/↘ prognoza 5d · ▲/▼ intraday</div>
+          <div className="asset-picker-list">
+            {groups.map(([label, rows]) => rows.length > 0 && (
+              <div key={label}>
+                <div className="asset-picker-group">{label}</div>
+                {rows.map(asset => {
+                  const rec = recMap.get(asset.id);
+                  const signal = assetSignal(rec, intradaySignals.get(asset.id));
+                  return (
+                    <button key={asset.id} className={`asset-picker-row${asset.id === selectedAsset ? " selected" : ""}`}
+                      onClick={() => { setSelectedAsset(asset.id); setOpen(false); setQuery(""); }}>
+                      <span className="asset-picker-state">{signal.state}</span>
+                      <span className="asset-picker-direction">{signal.forecast}{signal.intradayIcon}</span>
+                      <span className="asset-picker-symbol">{asset.symbol}</span>
+                      <span className="asset-picker-name">{asset.name}</span>
+                      {rec?.meta_trade_probability != null && <span className="asset-picker-meta">meta {rec.meta_trade_probability.toFixed(0)}%</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {filtered.length === 0 && <div className="asset-picker-empty">Brak pasujących aktywów</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Hero ─────────────────────────────────────────────────────────────────────
 
 export function Hero({
@@ -294,41 +427,19 @@ export function Hero({
   recommendations,
 }: Props) {
   const [dark, setDark] = useDarkMode();
-  const dbActive        = useDbPulse(loading);
-  const countdown       = useSchedulerCountdown(apiBase);
-  const providers       = useProviderStatus(apiBase, syncCounter);
-  const isSyncing       = useSyncStatus(apiBase, syncing);
+  const dbActive         = useDbPulse(loading);
+  const countdown        = useSchedulerCountdown(apiBase);
+  const providers        = useProviderStatus(apiBase, syncCounter);
+  const isSyncing        = useSyncStatus(apiBase, syncing);
   const marketCountdowns = useMarketCountdowns();
-
-  // Sygnały z rekomendacji przekazanych z App (bez osobnych requestów per aktywo)
-  const signals = new Map<string, AssetSignal>(
-    recommendations.map((d) => {
-      const rec  = d.recommendation       as string | null;
-      const ml5  = d.ml_prediction        as string | null;
-      const ml20 = d.ml_20d_prediction    as string | null;
-      const f5d  = d.forecast_dir_5d      as string | null;
-      const f20d = d.forecast_dir_20d     as string | null;
-      const allGreen =
-        rec  === "KUP"  &&
-        ml5  === "up"   &&
-        (ml20 === null || ml20 === "up") &&
-        f5d  === "up"   &&
-        f20d === "up";
-      const allRed =
-        rec  === "SPRZEDAJ" &&
-        ml5  === "down"     &&
-        (ml20 === null || ml20 === "down") &&
-        f5d  === "down"     &&
-        f20d === "down";
-      return [d.asset_id, allGreen ? "green" : allRed ? "red" : "neutral"] as const;
-    })
-  );
+  const intradaySignals  = useIntradaySignals(apiBase, assets);
 
   const [, tick] = useState(0);
   useEffect(() => { const id = setInterval(() => tick(n => n + 1), 30_000); return () => clearInterval(id); }, []);
 
   const trainedModels = mlModels.filter(m => m.is_active);
   const mlMode = mlStatus?.ml_mode ?? "heuristic";
+  const mlModeLabel = mlMode === "ml" ? "ML" : mlMode === "ml_partial" ? "MIX" : mlMode === "emergency_off" ? "OFF" : "HEU";
 
   return (
     <div className="sticky-bar">
@@ -336,28 +447,11 @@ export function Hero({
       <span className="sticky-brand">MStock</span>
 
       {/* Asset selector */}
-      <label className="sticky-field">
+      <div className="sticky-field">
         <span className="sticky-label">Aktywo</span>
-        <select className="sticky-select" value={selectedAsset} onChange={e => setSelectedAsset(e.target.value)}>
-          {(() => {
-            const foreign  = assets.filter(a => a.type === "stock" && a.currency !== "PLN");
-            const polish   = assets.filter(a => a.type === "stock" && a.currency === "PLN");
-            const commodities = assets.filter(a => a.type !== "stock");
-            const opt = (a: typeof assets[0]) => {
-              const sig = signals.get(a.id);
-              const dot = sig === "green" ? "🟢 " : sig === "red" ? "🔴 " : "";
-              return <option key={a.id} value={a.id}>{dot}{a.symbol} — {a.name}</option>;
-            };
-            return (
-              <>
-                {foreign.length > 0 && <optgroup label="── Spółki zagraniczne">{foreign.map(opt)}</optgroup>}
-                {polish.length > 0 && <optgroup label="── Spółki polskie (GPW)">{polish.map(opt)}</optgroup>}
-                {commodities.length > 0 && <optgroup label="── Surowce">{commodities.map(opt)}</optgroup>}
-              </>
-            );
-          })()}
-        </select>
-      </label>
+        <AssetPicker assets={assets} selectedAsset={selectedAsset} setSelectedAsset={setSelectedAsset}
+          recommendations={recommendations} intradaySignals={intradaySignals} />
+      </div>
 
       {/* Currency toggle */}
       <label className="sticky-field">
@@ -420,18 +514,18 @@ export function Hero({
       <div className="sticky-sep" />
 
       {/* ML models */}
-      <div className="sticky-models" title={trainedModels.length ? `Aktywne modele: ${trainedModels.map(m => m.target_name).join(", ")}` : "Brak wytrenowanych modeli"}>
+      <div className="sticky-models" title={`Automatyczna aktywacja ML: live ${mlStatus?.eligible_models ?? 0}/${mlStatus?.active_models ?? 0}, shadow ${mlStatus?.shadow_models ?? 0}, degraded ${mlStatus?.degraded_models ?? 0}`}>
         <Cpu size={13} />
         <span className="sticky-ml-badge" style={{
           background: trainedModels.length ? "rgba(22,163,74,.15)" : "rgba(148,163,184,.15)",
           color: trainedModels.length ? "var(--ok)" : "var(--text-3)",
         }}>
-          {mlMode === "ml" ? "ML" : "HEU"} · {trainedModels.length} mdl
+          {mlModeLabel} · {mlStatus?.eligible_models ?? 0}/{mlStatus?.active_models ?? trainedModels.length}
         </span>
         {(mlStatus?.targets ?? []).map(t => (
-          <span key={t.target_name} title={`${t.target_label}: ${t.is_trained ? "wytrenowany" : "brak modelu"}`}
+          <span key={t.target_name} title={`${t.target_label}: ${t.activation_state}`}
             style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-              background: t.is_trained ? "var(--ok)" : "rgba(148,163,184,.4)" }} />
+              background: t.activation_state === "eligible" ? "var(--ok)" : t.activation_state === "degraded" ? "#dc2626" : t.is_trained ? "#d97706" : "rgba(148,163,184,.4)" }} />
         ))}
       </div>
 

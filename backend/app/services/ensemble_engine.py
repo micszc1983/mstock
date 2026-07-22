@@ -30,7 +30,6 @@ from app.repositories.ensemble import (
 )
 from app.repositories.features import get_latest_feature_snapshot
 from app.repositories.forecasts import get_latest_forecasts
-from app.repositories.ml import get_active_model_run, get_all_active_model_runs, get_latest_prediction
 from app.repositories.prices import list_prices
 from app.schemas.ensemble import (
     DynamicWeightInfo,
@@ -96,61 +95,16 @@ def _heuristic_vote(db: Session, asset_id: str) -> SignalVote:
 # ── ML votes ──────────────────────────────────────────────────────────────────
 
 def _ml_vote(db: Session, asset_id: str, target: str, label: str) -> SignalVote:
-    pred = get_latest_prediction(db, asset_id, target)
+    from app.services.ml_activation import get_eligible_prediction
+    pred = get_eligible_prediction(db, asset_id, target)
     if pred is None:
-        # Zbierz per-asset + globalne modele
-        per_asset = get_all_active_model_runs(db, target, asset_id=asset_id)
-        global_runs = get_all_active_model_runs(db, target, asset_id=None)
-        per_asset_names = {r.model_name for r in per_asset}
-        active_runs = list(per_asset) + [r for r in global_runs if r.model_name not in per_asset_names]
-
-        if not active_runs:
-            return SignalVote(
-                source=f"ml_{target}", source_label=label,
-                direction="neutral", confidence=0.0, probability_up=50.0,
-                reasoning=f"Brak wytrenowanego modelu dla {target}.",
-                available=False,
-            )
-        # Model istnieje ale brak predykcji — wygeneruj on-the-fly z pełnym feature vectorem
-        try:
-            import json as _json
-            from app.repositories.ml import list_training_rows_for_target
-            from app.services.ml_models.registry import predict_proba_single
-            from statistics import mean as _mean
-
-            # Użyj ostatniego training row jako feature vector (pełny zestaw cech)
-            hist = list_training_rows_for_target(db, target, asset_id=asset_id, limit=26)
-            if not hist:
-                hist = list_training_rows_for_target(db, target, asset_id=None, limit=26)
-            if not hist:
-                raise ValueError("brak danych treningowych dla feature vector")
-
-            X_full = [_json.loads(r.feature_json) for r in hist]
-
-            probs = []
-            model_names = []
-            for run in active_runs:
-                try:
-                    p = predict_proba_single(run.model_name, run.model_path, X_full)
-                    probs.append(p)
-                    model_names.append(run.model_name)
-                except Exception:
-                    pass
-
-            if not probs:
-                raise ValueError("żaden model nie zwrócił predykcji")
-
-            prob = float(_mean(probs))
-        except Exception as exc:
-            return SignalVote(
-                source=f"ml_{target}", source_label=label,
-                direction="neutral", confidence=0.0, probability_up=50.0,
-                reasoning=f"Błąd inferecji ML: {exc}",
-                available=False,
-            )
-    else:
-        prob = pred.probability_up
-        model_names = []
+        return SignalVote(
+            source=f"ml_{target}", source_label=label,
+            direction="neutral", confidence=0.0, probability_up=50.0,
+            reasoning="Model działa w shadow albo nie przeszedł automatycznej bramki.",
+            available=False,
+        )
+    prob = pred.probability_up
 
     prob_pct = _clamp(prob * 100 if prob <= 1.0 else prob, 0, 100)
     direction = "up" if prob_pct > 52 else "down" if prob_pct < 48 else "neutral"
@@ -161,7 +115,7 @@ def _ml_vote(db: Session, asset_id: str, target: str, label: str) -> SignalVote:
         direction=direction,
         confidence=confidence,
         probability_up=prob_pct,
-        reasoning=f"p(up)={prob_pct:.1f}%" + (f", modele={','.join(model_names)}" if model_names else ", cached"),
+        reasoning=f"p(up)={prob_pct:.1f}%, aktywacja=auto, scope={pred.model_scope}",
         available=True,
     )
 
@@ -248,7 +202,7 @@ _MODE_LABELS = {
     "ensemble_majority":  "Ensemble większościowy",
 }
 
-_MIN_DYNAMIC_RECORDS = 5   # minimalna liczba ocenionych rekordów do aktywacji dynamicznych wag
+_MIN_DYNAMIC_RECORDS = 20  # zgodne z minimalną próbą live bramki ML
 _DYNAMIC_LOOKBACK     = 50  # ile ostatnich rekordów bierzemy pod uwagę
 _WEIGHT_MIN           = 0.2  # dolne ograniczenie wagi (zapobiega całkowitemu wyeliminowaniu systemu)
 _WEIGHT_MAX           = 0.8  # górne ograniczenie wagi
@@ -368,8 +322,15 @@ def build_ensemble_signal(
     else:  # ensemble_weighted
         prob, conf = _weighted_combine(votes, effective_h_weight, effective_ml_weight)
 
-    direction = "up" if prob > 52 else "down" if prob < 48 else "neutral"
-    action = "KUP" if prob > 60 else "SPRZEDAJ" if prob < 40 else "TRZYMAJ"
+    # Akcja nie korzysta już ze stałych 60/40. Głosy ensemble pozostają
+    # diagnostyczne, a decyzję i confidence wyznacza wspólna kalibracja
+    # historyczna GPW/USA × reżim, po kosztach transakcyjnych.
+    from app.services.recommendation_engine import build_recommendation
+
+    calibrated_recommendation = build_recommendation(db, asset_id)
+    action = calibrated_recommendation.recommendation if calibrated_recommendation else "BRAK TRANSAKCJI"
+    conf = calibrated_recommendation.confidence if calibrated_recommendation else 0.0
+    direction = "up" if action == "KUP" else "down" if action == "SPRZEDAJ" else "neutral"
     consensus, consensus_score = _consensus(votes)
 
     # Uzasadnienie
@@ -380,6 +341,12 @@ def build_ensemble_signal(
         rationale = f"Zbiorczy sygnał spadkowy (p={prob:.1f}%). Głosy: {', '.join(f'{v.source_label}→{v.direction}' for v in available)}."
     else:
         rationale = f"Brak wyraźnego sygnału (p={prob:.1f}%). Konsensus: {consensus}."
+    if calibrated_recommendation:
+        rationale += (
+            f" Decyzja skalibrowana: {action}, historyczne P={conf:.1f}%, "
+            f"przewaga netto={calibrated_recommendation.expected_net_edge_pct:.2f}% "
+            f"przy koszcie {calibrated_recommendation.transaction_cost_pct:.2f}%."
+        )
 
     signal = EnsembleSignal(
         asset_id=asset_id,

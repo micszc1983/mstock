@@ -1,4 +1,4 @@
-"""Random Forest — Stratified CV + Optuna hyperparameter tuning."""
+"""Random Forest — purged temporal CV + Optuna tuning bez przecieku."""
 from __future__ import annotations
 
 import joblib
@@ -28,21 +28,27 @@ def train(
     feature_names: list[str],
     model_path: str,
     best_params: dict | None = None,
+    X_cal: list | None = None,
+    y_cal: list | None = None,
 ) -> dict:
-    model = _build_model(best_params)
-    model.fit(X_train, y_train)
+    from app.services.ml_models.calibration import calibrate_fitted_model
+
+    base_model = _build_model(best_params)
+    base_model.fit(X_train, y_train)
+    model, calibration_metrics = calibrate_fitted_model(base_model, X_cal or [], y_cal or [])
     preds = model.predict(X_test)
     probs = model.predict_proba(X_test)[:, 1].tolist()
 
-    joblib.dump({"model": model, "feature_names": feature_names}, model_path)
+    joblib.dump({"model": model, "base_model": base_model, "feature_names": feature_names}, model_path)
     return {
         "accuracy":  float(accuracy_score(y_test, preds)),
         "precision": float(precision_score(y_test, preds, zero_division=0)),
         "recall":    float(recall_score(y_test, preds, zero_division=0)),
         "f1":        float(f1_score(y_test, preds, zero_division=0)),
         "avg_probability_up": float(sum(probs) / len(probs)) if probs else 0.5,
-        "feature_importances": dict(zip(feature_names, model.feature_importances_.tolist())),
+        "feature_importances": dict(zip(feature_names, base_model.feature_importances_.tolist())),
         "best_params": best_params or {},
+        **calibration_metrics,
     }
 
 
@@ -51,49 +57,42 @@ def cv_score(
     feature_names: list[str],  # noqa: ARG001
     n_splits: int = 5,
     best_params: dict | None = None,
+    groups: list | None = None,
+    purge_sessions: int = 20,
 ) -> dict:
-    import numpy as np
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.metrics import accuracy_score as _acc, f1_score as _f1
-
-    kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    acc_scores: list[float] = []
-    f1_scores:  list[float] = []
-
-    for train_idx, val_idx in kf.split(X, y):
-        model = _build_model(best_params)
-        model.fit([X[i] for i in train_idx], [y[i] for i in train_idx])
-        preds = model.predict([X[i] for i in val_idx])
-        y_val = [y[i] for i in val_idx]
-        acc_scores.append(float(_acc(y_val, preds)))
-        f1_scores.append(float(_f1(y_val, preds, zero_division=0)))
-
-    return {
-        "cv_accuracy_mean": round(float(np.mean(acc_scores)), 4),
-        "cv_accuracy_std":  round(float(np.std(acc_scores)), 4),
-        "cv_f1_mean":       round(float(np.mean(f1_scores)), 4),
-        "cv_f1_std":        round(float(np.std(f1_scores)), 4),
-        "cv_folds":         n_splits,
-    }
+    from app.services.ml_validation import evaluate_purged_cv
+    return evaluate_purged_cv(
+        X, y, groups or list(range(len(X))), lambda _y: _build_model(best_params),
+        n_splits=n_splits, purge_sessions=purge_sessions,
+    )
 
 
-def optimize(X: list, y: list, n_trials: int = 30) -> dict:
+def cpcv_score(X: list, y: list, groups: list, purge_sessions: int = 10, best_params: dict | None = None) -> dict:
+    from app.services.ml_validation import evaluate_cpcv
+    return evaluate_cpcv(
+        X, y, groups, lambda _y: _build_model(best_params), purge_sessions=purge_sessions,
+    )
+
+
+def optimize(
+    X: list, y: list, n_trials: int = 30,
+    groups: list | None = None, purge_sessions: int = 20,
+) -> dict:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    from sklearn.model_selection import StratifiedKFold, cross_val_score
+    from app.services.ml_validation import evaluate_purged_cv
 
     def objective(trial: optuna.Trial) -> float:
-        model = RandomForestClassifier(
-            n_estimators=trial.suggest_int("n_estimators", 100, 500, step=50),
-            max_depth=trial.suggest_int("max_depth", 3, 15),
-            min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 20),
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=1,
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 500, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 15),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 20),
+        }
+        result = evaluate_purged_cv(
+            X, y, groups or list(range(len(X))), lambda _y: _build_model(params),
+            n_splits=3, purge_sessions=purge_sessions,
         )
-        kf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-        scores = cross_val_score(model, X, y, cv=kf, scoring="f1", n_jobs=1)
-        return float(scores.mean())
+        return float(result.get("cv_f1_mean", 0.0))
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)

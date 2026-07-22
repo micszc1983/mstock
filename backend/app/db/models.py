@@ -52,7 +52,7 @@ class NewsItemORM(Base):
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     source: Mapped[str] = mapped_column(String(128))
-    title: Mapped[str] = mapped_column(String(500))
+    title: Mapped[str] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text)
     sentiment_score: Mapped[float] = mapped_column(Float)
     impact_score: Mapped[float] = mapped_column(Float)
@@ -279,6 +279,18 @@ class MLTrainingRowORM(Base):
     target_return_5d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target_return_20d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target_thesis_success: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    target_triple_barrier: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    target_meta_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    triple_barrier_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    triple_barrier_hit: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    meta_side: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    meta_strategy_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    market_segment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    market_regime: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    meta_primary_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    meta_primary_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    meta_model_disagreement: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    meta_label_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
 class MLModelRunORM(Base):
     __tablename__ = "ml_model_runs"
@@ -292,6 +304,27 @@ class MLModelRunORM(Base):
     metrics_json: Mapped[str] = mapped_column(Text)
     model_path: Mapped[str] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    deployment_role: Mapped[str] = mapped_column(String(16), default="candidate", server_default="candidate", index=True)
+    promotion_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    market_segment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+
+
+class MLModelMonitorORM(Base):
+    __tablename__ = "ml_model_monitors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_run_id: Mapped[int] = mapped_column(ForeignKey("ml_model_runs.id"), index=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    asset_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    market_segment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    feature_psi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    calibration_error: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    recent_avg_net_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    recent_profit_factor: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    is_degraded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", index=True)
+    action: Mapped[str] = mapped_column(String(32), default="keep", server_default="keep", index=True)
+    details_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
 
 class MLBacktestResultORM(Base):
     __tablename__ = "ml_backtest_results"
@@ -303,6 +336,9 @@ class MLBacktestResultORM(Base):
 
 class MLPredictionORM(Base):
     __tablename__ = "ml_predictions"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "snapshot_at", "target_name", name="uq_ml_prediction_snapshot"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
@@ -490,4 +526,173 @@ class EarningsCallAnalysisORM(Base):
     summary: Mapped[str] = mapped_column(Text)
     model_used: Mapped[str] = mapped_column(String(64))
     news_articles_used: Mapped[int] = mapped_column(Integer, default=0)
-    raw_response: Mapped[str] = mapped_column(Text)
+
+
+class IntradayBacktestORM(Base):
+    __tablename__ = "intraday_backtests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    resolution: Mapped[str] = mapped_column(String(8), default="15")
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    lookback_days: Mapped[int] = mapped_column(Integer, default=30)
+    candles_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_signals: Mapped[int] = mapped_column(Integer, default=0)
+    win_count: Mapped[int] = mapped_column(Integer, default=0)
+    loss_count: Mapped[int] = mapped_column(Integer, default=0)
+    timeout_count: Mapped[int] = mapped_column(Integer, default=0)
+    win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    avg_win_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    avg_loss_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    avg_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expectancy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Calibrated thresholds (default = baseline)
+    rsi_oversold: Mapped[float] = mapped_column(Float, default=32.0)
+    rsi_overbought: Mapped[float] = mapped_column(Float, default=68.0)
+    sl_pct: Mapped[float] = mapped_column(Float, default=1.5)
+    tp_pct: Mapped[float] = mapped_column(Float, default=2.0)
+    # Baseline comparison (default params)
+    default_signals: Mapped[int] = mapped_column(Integer, default=0)
+    default_win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_expectancy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trades_json: Mapped[str] = mapped_column(Text, default="[]")
+    initial_capital: Mapped[float] = mapped_column(Float, default=10000.0)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class AnomalyScoreORM(Base):
+    __tablename__ = "anomaly_scores"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "scored_at", name="uq_anomaly_score"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    anomaly_score: Mapped[float] = mapped_column(Float)           # 0-100, 100 = najbardziej anomalny
+    is_anomaly: Mapped[bool] = mapped_column(Boolean, default=False)
+    trained_on_rows: Mapped[int] = mapped_column(Integer, default=0)
+    top_features_json: Mapped[str] = mapped_column(Text, default="[]")  # JSON list[{feature,value,median,z_score}]
+    raw_response: Mapped[str] = mapped_column(Text, default="")
+
+
+class PaperAccountORM(Base):
+    __tablename__ = "paper_accounts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    initial_cash: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PaperPositionORM(Base):
+    __tablename__ = "paper_positions"
+    __table_args__ = (UniqueConstraint("account_id", "asset_id", name="uq_paper_position"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("paper_accounts.id"), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_price: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PaperOrderORM(Base):
+    __tablename__ = "paper_orders"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("paper_accounts.id"), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    side: Mapped[str] = mapped_column(String(8), index=True)
+    order_type: Mapped[str] = mapped_column(String(16), default="market")
+    quantity: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reference_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fill_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    slippage: Mapped[float] = mapped_column(Float, default=0.0)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class PaperTradeORM(Base):
+    __tablename__ = "paper_trades"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("paper_orders.id"), unique=True, index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("paper_accounts.id"), index=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    gross_value: Mapped[float] = mapped_column(Float)
+    costs: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class RecommendationRecordORM(Base):
+    """Niezmienny dziennik decyzji modelu i ich późniejszych rezultatów."""
+
+    __tablename__ = "recommendation_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_id", "snapshot_at", "model_version",
+            name="uq_recommendation_record_snapshot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    model_version: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16), index=True)
+    regime: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(16), index=True)
+    displayed_action: Mapped[str] = mapped_column(String(32), index=True)
+    has_position: Mapped[bool] = mapped_column(Boolean, default=False)
+    calibration_scope: Mapped[str] = mapped_column(String(32))
+    calibration_sample_size: Mapped[int] = mapped_column(Integer)
+    composite_score: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    probability_buy: Mapped[float] = mapped_column(Float)
+    probability_sell: Mapped[float] = mapped_column(Float)
+    probability_no_trade: Mapped[float] = mapped_column(Float)
+    buy_threshold: Mapped[float] = mapped_column(Float)
+    sell_threshold: Mapped[float] = mapped_column(Float)
+    transaction_cost_pct: Mapped[float] = mapped_column(Float)
+    expected_gross_edge_pct: Mapped[float] = mapped_column(Float)
+    expected_net_edge_pct: Mapped[float] = mapped_column(Float)
+    uncertainty_pct: Mapped[float] = mapped_column(Float)
+    meta_trade_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    meta_gate_applied: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    meta_trade_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    meta_threshold_scope: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    base_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_flag: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    realized_return_1d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_return_5d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_return_20d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    strategy_net_return_1d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    strategy_net_return_5d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    strategy_net_return_20d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evaluated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class RecommendationAuditRunORM(Base):
+    """Wersjonowany wynik audytu walk-forward, przeznaczony do porównań w czasie."""
+
+    __tablename__ = "recommendation_audit_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    model_version: Mapped[str] = mapped_column(String(32), index=True)
+    dataset_rows: Mapped[int] = mapped_column(Integer)
+    eligible_rows: Mapped[int] = mapped_column(Integer)
+    excluded_outliers: Mapped[int] = mapped_column(Integer)
+    fold_count: Mapped[int] = mapped_column(Integer)
+    embargo_sessions: Mapped[int] = mapped_column(Integer)
+    result_json: Mapped[str] = mapped_column(Text)

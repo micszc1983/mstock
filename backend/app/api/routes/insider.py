@@ -12,7 +12,7 @@ from app.repositories.insider import (
     list_insider_trades,
 )
 from app.schemas.insider import InsiderTrade, ShortInterest
-from app.services.insider_service import sync_all_insider_data, sync_insider_data
+from app.services.insider_service import sync_all_insider_data, sync_insider_data, get_insider_sentiment
 
 router = APIRouter(tags=["insider"])
 
@@ -48,6 +48,18 @@ def sync_asset_insider(asset_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
     result = sync_insider_data(db, asset_row)
     return {"asset_id": asset_id, **result}
+
+
+@router.get("/assets/{asset_id}/insider-sentiment")
+def get_asset_insider_sentiment(
+    asset_id: str,
+    days: int = 90,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Sentyment insiderów: net buy/sell signal za ostatnie N dni."""
+    if get_asset(db, asset_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
+    return get_insider_sentiment(db, asset_id, days=days)
 
 
 @router.post("/sync/insider")

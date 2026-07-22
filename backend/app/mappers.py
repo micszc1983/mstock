@@ -218,6 +218,9 @@ def ml_model_run_to_schema(row: MLModelRunORM) -> MLModelRunResponse:
         metrics_json=row.metrics_json,
         model_path=row.model_path,
         is_active=row.is_active,
+        deployment_role=row.deployment_role,
+        promotion_reason=row.promotion_reason,
+        market_segment=row.market_segment,
     )
 
 def ml_backtest_to_schema(row: MLBacktestResultORM) -> MLBacktestResponse:

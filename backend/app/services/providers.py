@@ -194,7 +194,7 @@ def fetch_metal_prices_from_alpha_vantage(function_name: str) -> List[PricePoint
         raise HTTPException(status_code=502, detail=f"Alpha Vantage metal sync failed: {detail}")
 
     points: List[PricePoint] = []
-    for row in reversed(data):
+    for row in sorted(data, key=lambda item: item.get("date", "")):
         close = float(row["value"])
         ts = datetime.fromisoformat(row["date"]).replace(tzinfo=timezone.utc)
         points.append(PricePoint(timestamp=ts, open=close, high=close, low=close, close=close, volume=0.0))

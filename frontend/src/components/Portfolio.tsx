@@ -14,6 +14,7 @@ type RecData = {
   forecast_dir_20d: string | null;
   last_price: number | null;
   currency: string;
+  intraday_signal: "BUY" | "SELL" | null;
 };
 
 type Props = {
@@ -33,6 +34,7 @@ function recBadge(rec: string | null) {
   if (rec === "KUP")      return { label: "KUP",      bg: "rgba(22,163,74,0.13)",  color: "#16a34a" };
   if (rec === "SPRZEDAJ") return { label: "SPRZEDAJ", bg: "rgba(220,38,38,0.11)",  color: "#dc2626" };
   if (rec === "TRZYMAJ")  return { label: "TRZYMAJ",  bg: "rgba(217,119,6,0.11)",  color: "#d97706" };
+  if (rec === "BRAK TRANSAKCJI") return { label: "BRAK TRANSAKCJI", bg: "rgba(100,116,139,0.10)", color: "#64748b" };
   return { label: "—", bg: "var(--bg-subtle)", color: "var(--text-3)" };
 }
 
@@ -97,6 +99,18 @@ export function Portfolio({ apiBase, assets }: Props) {
           } catch {}
         }
         const asset = assets.find(a => a.id === id);
+        let intraday_signal: "BUY" | "SELL" | null = null;
+        if (asset?.type === "stock") {
+          try {
+            const ir = await fetch(`${apiBase}/assets/${id}/intraday/signals?resolution=15`);
+            if (ir.ok) {
+              const id2 = await ir.json();
+              const sigs: Array<{ type: string; strength: number }> = id2.signals ?? [];
+              if (sigs.some(s => s.type === "BUY" && s.strength >= 0.6)) intraday_signal = "BUY";
+              else if (sigs.some(s => s.type === "SELL" && s.strength >= 0.6)) intraday_signal = "SELL";
+            }
+          } catch {}
+        }
         return [id, {
           recommendation:  d.recommendation ?? null,
           ml_prediction:   d.ml_prediction ?? null,
@@ -104,6 +118,7 @@ export function Portfolio({ apiBase, assets }: Props) {
           forecast_dir_20d: d.forecast_dir_20d ?? null,
           last_price,
           currency: asset?.currency ?? "USD",
+          intraday_signal,
         }] as const;
       } catch {
         return [id, {}] as const;
@@ -138,9 +153,9 @@ export function Portfolio({ apiBase, assets }: Props) {
     setAddAssetId(""); setAddQty("");
   }
 
-  // Sort: SPRZEDAJ → KUP → TRZYMAJ
+  // Sort: SPRZEDAJ → KUP → TRZYMAJ → BRAK TRANSAKCJI
   const sorted = [...positions].sort((a, b) => {
-    const order: Record<string, number> = { SPRZEDAJ: 0, KUP: 1, TRZYMAJ: 2 };
+    const order: Record<string, number> = { SPRZEDAJ: 0, KUP: 1, TRZYMAJ: 2, "BRAK TRANSAKCJI": 3 };
     const ra = recMap[a.asset_id]?.recommendation ?? "TRZYMAJ";
     const rb = recMap[b.asset_id]?.recommendation ?? "TRZYMAJ";
     return (order[ra] ?? 2) - (order[rb] ?? 2);
@@ -229,7 +244,7 @@ export function Portfolio({ apiBase, assets }: Props) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
             <thead>
               <tr style={{ background: "var(--bg-subtle)", borderBottom: "2px solid var(--border)" }}>
-                {["Sygnał", "Aktywo", "Symbol", "Ilość", "Cena", "Wartość", "Rekomendacja", "ML", "5d", "20d", ""].map((h, i) => (
+                {["Sygnał", "Aktywo", "Symbol", "Ilość", "Cena", "Wartość", "Rekomendacja", "ML", "5d", "20d", "Intraday", ""].map((h, i) => (
                   <th key={i} style={{ padding: "7px 10px", textAlign: ["Ilość","Cena","Wartość"].includes(h) ? "right" : "left", fontWeight: 600, fontSize: "0.78rem", color: "var(--text-3)", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -264,6 +279,13 @@ export function Portfolio({ apiBase, assets }: Props) {
                     <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.ml_prediction === "up" ? "up" : rd.ml_prediction === "down" ? "down" : null)}</td>
                     <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.forecast_dir_5d)}</td>
                     <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.forecast_dir_20d)}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "center" }}>
+                      {rd.intraday_signal === "BUY"
+                        ? <span title="Sygnał intraday: KUP" style={{ color: "#16a34a", fontWeight: 700, fontSize: "0.9rem" }}>▲</span>
+                        : rd.intraday_signal === "SELL"
+                          ? <span title="Sygnał intraday: SPRZEDAJ" style={{ color: "#dc2626", fontWeight: 700, fontSize: "0.9rem" }}>▼</span>
+                          : <span style={{ color: "var(--text-3)" }}>—</span>}
+                    </td>
                     <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
                       {isEdit ? (
                         <>

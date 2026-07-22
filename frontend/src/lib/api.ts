@@ -1,4 +1,10 @@
 import type {
+  AnomalyScore,
+  AnomalyHistoryPoint,
+  InsiderSentiment,
+  PEADAnalysis,
+  IntradayBacktest,
+  IntradayAIAnalysis,
   SmsAlertConfig,
   AggregateDashboardResponse,
   AssetCreate,
@@ -33,6 +39,7 @@ import type {
   DataQualityReport,
   MLExplanation,
   MLModelComparison,
+  MLMonitor,
   Watchlist,
   EarningsCalendarResponse,
   EarningsRecord,
@@ -42,6 +49,13 @@ import type {
   TopPick,
   IntradayCandle,
   IntradaySignalsResponse,
+  IntradayFullResponse,
+  SimulatorPerformance,
+  PaperAccount,
+  PaperOrder,
+  PaperJournal,
+  RecommendationAudit,
+  RecommendationJournalRecord,
 } from "./types";
 
 // Jeśli otwarto z innego hosta niż localhost (np. 192.168.x.x), używaj tego samego hosta
@@ -55,6 +69,10 @@ function _defaultApiBase(): string {
   return "http://127.0.0.1:8000";
 }
 export const API_BASE = _defaultApiBase();
+export const adminHeaders = (): HeadersInit => {
+  const key = import.meta.env.VITE_ADMIN_API_KEY;
+  return key ? { "X-Admin-Key": key } : {};
+};
 
 // Pozwala App.tsx aktualizować base URL gdy user zmieni pole Backend
 let _activeBase = API_BASE;
@@ -62,7 +80,10 @@ export function setApiBaseUrl(url: string) { _activeBase = url.replace(/\/$/, ""
 export function getApiBaseUrl() { return _activeBase; }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, {
+    ...init,
+    headers: { ...adminHeaders(), ...(init?.headers ?? {}) },
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -72,7 +93,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 async function postJson<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: { ...adminHeaders(), ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!response.ok) {
@@ -290,6 +311,8 @@ export const api = {
     }),
 
   mlModels: () => fetchJson<MLModelRun[]>(`${_activeBase}/ml/models`),
+  mlMonitoring: () => fetchJson<MLMonitor[]>(`${_activeBase}/ml/monitor`),
+  runMlMonitoring: () => postJson<MLMonitor[]>(`${_activeBase}/ml/monitor/run`),
 
   runMlBacktest: (target_name = "target_up_5d", asset_id?: string) =>
     postJson<MLBacktest>(
@@ -354,8 +377,27 @@ export const api = {
   assetRecommendation: (assetId: string) =>
     fetchJson<AssetRecommendation>(`${_activeBase}/assets/${assetId}/recommendation`),
 
+  latestRecommendationAudit: () =>
+    fetchJson<RecommendationAudit>(`${_activeBase}/recommendations/audit/latest`),
+
+  runRecommendationAudit: (folds = 3) =>
+    fetchJson<RecommendationAudit>(`${_activeBase}/admin/recommendations/audit?folds=${folds}`, { method: "POST" }),
+
+  recommendationJournal: (limit = 200, assetId?: string) =>
+    fetchJson<RecommendationJournalRecord[]>(
+      `${_activeBase}/recommendations/journal?limit=${limit}${assetId ? `&asset_id=${encodeURIComponent(assetId)}` : ""}`
+    ),
+
+  snapshotRecommendationJournal: () =>
+    fetchJson<{ inserted: number; evaluated: number }>(`${_activeBase}/admin/recommendations/journal/snapshot`, { method: "POST" }),
+
   trainAllMlModels: () =>
     postJson<Array<Record<string, unknown>>>(`${_activeBase}/ml/models/train-all`),
+
+  trainMlChallengers: (assetId: string, targetName = "target_meta_label") =>
+    postJson<Record<string, unknown>>(
+      `${_activeBase}/ml/models/train-challengers?asset_id=${encodeURIComponent(assetId)}&target_name=${encodeURIComponent(targetName)}`
+    ),
 
   mlExplain: (assetId: string, targetName = "target_up_5d") =>
     fetchJson<MLExplanation>(
@@ -440,6 +482,53 @@ export const api = {
       `${_activeBase}/assets/${assetId}/intraday/volume-profile?resolution=${resolution}&limit=${limit}`
     ),
 
+  intradayFull: (assetId: string, resolution = "15") =>
+    fetchJson<IntradayFullResponse>(
+      `${_activeBase}/assets/${assetId}/intraday/full?resolution=${resolution}`
+    ),
+
+  intradayBacktest: (assetId: string, resolution = "15") =>
+    fetchJson<IntradayBacktest>(
+      `${_activeBase}/assets/${assetId}/intraday/backtest?resolution=${resolution}`
+    ),
+
+  intradayBacktestRun: (assetId: string, resolution = "15", lookbackDays = 30) =>
+    postJson<IntradayBacktest>(
+      `${_activeBase}/assets/${assetId}/intraday/backtest/run?resolution=${resolution}&lookback_days=${lookbackDays}`
+    ),
+
+  intradayAIAnalysis: (assetId: string, resolution = "15") =>
+    postJson<IntradayAIAnalysis>(
+      `${_activeBase}/assets/${assetId}/intraday/ai-analysis?resolution=${resolution}`
+    ),
+
+  simulatorPerformance: (assetId: string) =>
+    fetchJson<SimulatorPerformance>(`${_activeBase}/assets/${assetId}/simulator/performance`),
+
+  createPaperAccount: (name: string, initialCash: number, currency: string) =>
+    postJson<PaperAccount>(`${_activeBase}/paper/accounts`, {
+      name,
+      initial_cash: initialCash,
+      currency,
+    }),
+
+  paperAccount: (accountId: number) =>
+    fetchJson<PaperAccount>(`${_activeBase}/paper/accounts/${accountId}`),
+
+  placePaperOrder: (
+    accountId: number,
+    assetId: string,
+    side: "buy" | "sell",
+    quantity: number,
+  ) => postJson<PaperOrder>(`${_activeBase}/paper/accounts/${accountId}/orders`, {
+    asset_id: assetId,
+    side,
+    quantity,
+  }),
+
+  paperJournal: (accountId: number, limit = 200) =>
+    fetchJson<PaperJournal>(`${_activeBase}/paper/accounts/${accountId}/journal?limit=${limit}`),
+
   intradaySync: (assetId: string, resolution = "15") =>
     postJson<{ asset_id: string; resolution: string; new_candles: number; fetched_from_api: number; already_in_db: number }>(
       `${_activeBase}/assets/${assetId}/intraday/sync?resolution=${resolution}`
@@ -450,4 +539,24 @@ export const api = {
 
   saveSmsAlertConfig: (cfg: Partial<Omit<SmsAlertConfig, "sms_status" | "alert_rule_labels" | "alert_rule_descriptions" | "threshold_labels" | "defaults">>) =>
     postJson<{ ok: boolean; saved: string[] }>(`${_activeBase}/admin/sms-alert-config`, cfg),
+
+  anomalyScore: (assetId: string) =>
+    fetchJson<AnomalyScore>(`${_activeBase}/assets/${assetId}/anomaly`),
+
+  anomalyHistory: (assetId: string, limit = 30) =>
+    fetchJson<AnomalyHistoryPoint[]>(`${_activeBase}/assets/${assetId}/anomaly/history?limit=${limit}`),
+
+  anomalyRefresh: (assetId: string) =>
+    postJson<AnomalyScore>(`${_activeBase}/assets/${assetId}/anomaly/refresh`),
+
+  insiderSentiment: (assetId: string, days = 90) =>
+    fetchJson<InsiderSentiment>(`${_activeBase}/assets/${assetId}/insider-sentiment?days=${days}`),
+
+  syncInsider: (assetId: string) =>
+    postJson<{ asset_id: string; insider_trades: number; short_interest: number }>(
+      `${_activeBase}/assets/${assetId}/sync/insider`
+    ),
+
+  pead: (assetId: string) =>
+    fetchJson<PEADAnalysis>(`${_activeBase}/assets/${assetId}/pead`),
 };

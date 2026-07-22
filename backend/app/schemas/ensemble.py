@@ -42,7 +42,7 @@ class EnsembleSignal(BaseModel):
     weights_evaluated_records: int = 0   # ile rekordów posłużyło do obliczenia wag
 
     # Rekomendacja
-    action: str                  # "KUP" | "SPRZEDAJ" | "TRZYMAJ"
+    action: str                  # "KUP" | "SPRZEDAJ" | "TRZYMAJ" | "BRAK TRANSAKCJI"
     rationale: str
 
 

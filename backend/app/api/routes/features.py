@@ -25,7 +25,7 @@ def _ensure_asset_exists(db: Session, asset_id: str):
 def rebuild_features(db: Session = Depends(get_db)) -> dict[str, int]:
     assets = list_assets(db)
     built = rebuild_all_features_and_forecasts(db, assets)
-    return {"rebuilt": built}
+    return {"rebuilt_assets": built}
 
 
 @router.get("/assets/{asset_id}/features/latest", response_model=DailyAssetFeatureSnapshot)
@@ -61,10 +61,15 @@ def get_forecast_latest(asset_id: str, db: Session = Depends(get_db)) -> list[Fo
 
 
 @router.get("/assets/{asset_id}/forecast/history", response_model=list[ForecastResponse])
-def get_forecast_history(asset_id: str, limit: int = Query(default=100, ge=1, le=1000), db: Session = Depends(get_db)) -> list[ForecastResponse]:
+def get_forecast_history(
+    asset_id: str,
+    horizon: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> list[ForecastResponse]:
     row = _ensure_asset_exists(db, asset_id)
-    items = list_forecast_history(db, asset_id, limit=limit)
+    items = list_forecast_history(db, asset_id, horizon=horizon, limit=limit)
     if not items:
         rebuild_all_features_and_forecasts(db, [row])
-        items = list_forecast_history(db, asset_id, limit=limit)
+        items = list_forecast_history(db, asset_id, horizon=horizon, limit=limit)
     return [forecast_to_schema(item) for item in items]

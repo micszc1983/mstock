@@ -145,6 +145,11 @@ export type MLActiveModel = {
   model_name: string | null;
   is_trained: boolean;
   dataset_rows: number;
+  active_models: number;
+  eligible_models: number;
+  shadow_models: number;
+  degraded_models: number;
+  activation_state: "untrained" | "shadow" | "degraded" | "partial" | "eligible";
 };
 
 export type MLStatus = {
@@ -155,6 +160,12 @@ export type MLStatus = {
   dataset_rows: number;
   min_training_rows: number;
   ready_for_training: boolean;
+  activation_mode: "automatic";
+  emergency_disabled: boolean;
+  active_models: number;
+  eligible_models: number;
+  shadow_models: number;
+  degraded_models: number;
   targets: MLActiveModel[];
 };
 
@@ -165,6 +176,9 @@ export type MLDatasetStats = {
   labeled_rows_5d: number;
   labeled_rows_20d: number;
   thesis_success_rows: number;
+  triple_barrier_rows: number;
+  meta_label_rows: number;
+  oof_meta_label_rows: number;
 };
 
 export type MLModelRun = {
@@ -177,6 +191,9 @@ export type MLModelRun = {
   metrics_json: string;
   model_path: string;
   is_active: boolean;
+  deployment_role: "champion" | "challenger" | "candidate" | "rejected" | "archived";
+  promotion_reason: string | null;
+  market_segment: string | null;
 };
 
 export type MLBacktest = {
@@ -204,6 +221,29 @@ export type MLModelComparison = {
   cv_f1_std?: number | null;
   cv_folds?: number | null;
   optuna_best_params?: Record<string, unknown> | null;
+  deployment_role?: string;
+  promotion_reason?: string | null;
+  holdout_avg_net_return_pct?: number | null;
+  holdout_profit_factor?: number | null;
+  holdout_max_drawdown_pct?: number | null;
+  holdout_win_rate_pct?: number | null;
+  cv_method?: string | null;
+  cv_purge_sessions?: number | null;
+  market_segment?: string | null;
+  calibration_method?: string | null;
+  calibration_ece?: number | null;
+  cpcv_f1_mean?: number | null;
+  cpcv_paths?: number | null;
+  pbo?: number | null;
+  deflated_sharpe_ratio?: number | null;
+};
+
+export type MLMonitor = {
+  id: number; model_run_id: number; checked_at: string;
+  asset_id: string | null; market_segment: string | null;
+  feature_psi: number | null; calibration_error: number | null;
+  recent_avg_net_return_pct: number | null; recent_profit_factor: number | null;
+  sample_size: number; is_degraded: boolean; action: string; details_json: string;
 };
 
 export type MLPrediction = {
@@ -344,10 +384,23 @@ export type AssetRecommendation = {
   name: string;
   symbol: string;
   asset_type: string;
-  recommendation: "KUP" | "SPRZEDAJ" | "TRZYMAJ";
+  recommendation: "KUP" | "SPRZEDAJ" | "TRZYMAJ" | "BRAK TRANSAKCJI";
   composite_score: number;
   confidence: number;
   confidence_label: string;
+  market_segment: "GPW" | "USA" | "OTHER" | "UNKNOWN";
+  calibration_scope: "market_regime" | "market" | "regime" | "global" | "insufficient_data";
+  calibration_sample_size: number;
+  probability_buy: number;
+  probability_sell: number;
+  probability_no_trade: number;
+  buy_threshold: number;
+  sell_threshold: number;
+  transaction_cost_pct: number;
+  expected_gross_edge_pct: number;
+  expected_net_edge_pct: number;
+  uncertainty_pct: number;
+  no_trade_reason: string | null;
   trend_score: number;
   sentiment_score: number;
   fragility_score: number;
@@ -367,6 +420,11 @@ export type AssetRecommendation = {
   ml_20d_prediction: string | null;
   ml_20d_prob_up: number | null;
   ml_thesis_prediction: string | null;
+  ml_meta_prediction: string | null;
+  meta_trade_probability: number | null;
+  meta_gate_applied: boolean;
+  meta_trade_threshold: number | null;
+  meta_threshold_scope: string | null;
   directional_accuracy: number | null;
   active_alerts: number;
   has_critical_alert: boolean;
@@ -387,6 +445,65 @@ export type TopPick = AssetRecommendation & {
   max_signals: number;
   aligned_labels: string[];
   missing_labels: string[];
+};
+
+export type RecommendationStrategyMetrics = {
+  signals: number;
+  trades: number;
+  coverage_pct: number;
+  no_trade_pct: number;
+  win_rate_pct: number;
+  avg_net_return_pct: number;
+  median_net_return_pct: number;
+  profit_factor: number | null;
+  portfolio_return_pct: number;
+  max_drawdown_pct: number;
+  sharpe: number | null;
+  sortino: number | null;
+};
+
+export type RecommendationAudit = {
+  id: number;
+  model_version: string;
+  created_at: string;
+  dataset_rows: number;
+  eligible_rows: number;
+  evaluated_rows: number;
+  excluded_outliers: number;
+  outlier_reasons: Record<string, number>;
+  fold_count: number;
+  embargo_sessions: number;
+  horizon_sessions: number;
+  folds: Array<{
+    fold: number; train_end_exclusive: string; test_start: string; test_end: string;
+    train_rows: number; test_rows: number; embargo_sessions: number; scopes: Record<string, number>;
+  }>;
+  strategies: Record<string, RecommendationStrategyMetrics>;
+  calibration: {
+    multiclass_brier: number; log_loss: number; ece: number;
+    class_accuracy_pct: number; trade_direction_accuracy_pct: number;
+    bins: Array<{ from: number; to: number; count: number; accuracy: number; confidence: number }>;
+  };
+  by_market: Array<{ name: string } & RecommendationStrategyMetrics>;
+  by_regime: Array<{ name: string } & RecommendationStrategyMetrics>;
+  notes: string[];
+};
+
+export type RecommendationJournalRecord = {
+  id: number; asset_id: string; snapshot_at: string; created_at: string;
+  model_version: string; market: string; regime: string; action: string;
+  displayed_action: string; has_position: boolean; calibration_scope: string;
+  calibration_sample_size: number; composite_score: number; confidence: number;
+  probability_buy: number; probability_sell: number; probability_no_trade: number;
+  buy_threshold: number; sell_threshold: number; transaction_cost_pct: number;
+  expected_gross_edge_pct: number; expected_net_edge_pct: number; uncertainty_pct: number;
+  base_price: number | null; quality_flag: string | null;
+  realized_return_1d_pct: number | null; realized_return_5d_pct: number | null;
+  realized_return_20d_pct: number | null; strategy_net_return_1d_pct: number | null;
+  strategy_net_return_5d_pct: number | null; strategy_net_return_20d_pct: number | null;
+  evaluated_at: string | null;
+  meta_trade_probability: number | null; meta_gate_applied: boolean;
+  meta_trade_threshold: number | null; meta_threshold_scope: string | null;
 };
 
 export type EarningsRecord = {
@@ -632,6 +749,53 @@ export type CandlePattern = {
   strength: number;
 };
 
+export type InsiderTradeEntry = {
+  date: string;
+  name: string;
+  type: "buy" | "sell" | "other";
+  code: string;
+  shares: number | null;
+  price: number | null;
+  value: number | null;
+};
+
+export type InsiderSentiment = {
+  asset_id: string;
+  days: number;
+  signal: "bullish" | "bearish" | "neutral";
+  signal_description: string;
+  n_buys: number;
+  n_sells: number;
+  buy_shares: number;
+  sell_shares: number;
+  net_shares: number;
+  buy_value: number;
+  sell_value: number;
+  recent_trades: InsiderTradeEntry[];
+};
+
+export type AnomalyFeature = {
+  feature: string;
+  value: number;
+  median: number;
+  z_score: number;
+};
+
+export type AnomalyScore = {
+  asset_id: string;
+  scored_at: string;
+  anomaly_score: number;   // 0-100, 100 = najbardziej anomalny
+  is_anomaly: boolean;
+  trained_on_rows: number;
+  top_features: AnomalyFeature[];
+};
+
+export type AnomalyHistoryPoint = {
+  scored_at: string;
+  anomaly_score: number;
+  is_anomaly: boolean;
+};
+
 export type MarketRegime = {
   regime: "trend_up" | "trend_down" | "range" | "volatile" | "unknown";
   adx: number | null;
@@ -639,6 +803,111 @@ export type MarketRegime = {
   di_minus: number | null;
   bb_squeeze: boolean;
   description: string;
+};
+
+export type PEADEvent = {
+  report_date: string;
+  fiscal_period: string | null;
+  eps_surprise_pct: number | null;
+  surprise_label: "BEAT" | "MISS" | "MEET" | null;
+  drift_1d: number | null;
+  drift_5d: number | null;
+  drift_20d: number | null;
+  aligned: boolean | null;
+};
+
+export type PEADAnalysis = {
+  asset_id: string;
+  status: "active" | "expired" | "no_data";
+  status_description: string;
+  reliability_pct: number | null;
+  n_events: number;
+  events: PEADEvent[];
+  current_drift_pct: number | null;
+  days_since_earnings: number | null;
+  last_report_date: string | null;
+  last_surprise_label: "BEAT" | "MISS" | "MEET" | null;
+  last_eps_surprise_pct: number | null;
+  sue: number | null;
+};
+
+export type IntradayBacktestTrade = {
+  direction: "BUY" | "SELL";
+  entry_price: number;
+  pct: number;
+  result: "TP" | "SL" | "TIMEOUT";
+  bars_held: number;
+  timestamp: string;
+};
+
+export type IntradayBacktest = {
+  id: number;
+  asset_id: string;
+  resolution: string;
+  run_at: string;
+  lookback_days: number;
+  candles_count: number;
+  total_signals: number;
+  win_count: number;
+  loss_count: number;
+  timeout_count: number;
+  win_rate: number | null;
+  avg_win_pct: number | null;
+  avg_loss_pct: number | null;
+  avg_return_pct: number | null;
+  total_return_pct: number | null;
+  expectancy: number | null;
+  calibrated: {
+    rsi_oversold: number;
+    rsi_overbought: number;
+    sl_pct: number;
+    tp_pct: number;
+  };
+  default: {
+    total_signals: number;
+    win_rate: number | null;
+    expectancy: number | null;
+  };
+  trades: IntradayBacktestTrade[];
+  portfolio: {
+    initial_capital?: number;
+    final_capital?: number;
+    net_profit?: number;
+    return_pct?: number;
+    max_drawdown_pct?: number;
+    sharpe?: number;
+    sortino?: number;
+    profit_factor?: number | null;
+    total_costs?: number;
+    commission_pct?: number;
+    slippage_pct?: number;
+  };
+};
+
+export type IntradayAIAnalysis = {
+  decyzja: "KUP" | "TRZYMAJ" | "SPRZEDAJ";
+  pewnosc: number;
+  uzasadnienie: string;
+  kluczowe_argumenty: string[];
+  ryzyka: string[];
+  poziomy: {
+    wejscie: number | null;
+    stop_loss: number | null;
+    take_profit: number | null;
+  };
+  horyzont: string;
+  _model?: string;
+  _cached?: boolean;
+};
+
+export type IntradayFullResponse = {
+  candles: IntradayCandle[];
+  signals: IntradaySignalsResponse;
+  volume_profile: VolumeProfile | null;
+  relative_strength: RelativeStrengthData | null;
+  anomaly: AnomalyScore | null;
+  insider: InsiderSentiment | null;
+  pead: PEADAnalysis | null;
 };
 
 export type IntradaySignalsResponse = {
@@ -651,3 +920,80 @@ export type IntradaySignalsResponse = {
   current_vwap: number | null;
   regime: MarketRegime;
 };
+
+export type SimulatorReturnPeriod = {
+  key: "1w" | "1m" | "3m" | "1y";
+  label: string;
+  days: number;
+  start_price: number | null;
+  end_price: number;
+  return_pct: number | null;
+  available: boolean;
+};
+
+export type SimulatorPerformance = {
+  asset_id: string;
+  symbol: string;
+  name: string;
+  currency: string;
+  current_price: number | null;
+  last_price_date: string | null;
+  returns: SimulatorReturnPeriod[];
+  has_enough_data: boolean;
+};
+
+export type PaperPosition = {
+  asset_id: string;
+  quantity: number;
+  avg_price: number;
+  last_price: number;
+  market_value: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+};
+
+export type PaperAccount = {
+  id: number;
+  name: string;
+  currency: string;
+  initial_cash: number;
+  cash: number;
+  market_value: number;
+  equity: number;
+  total_return_pct: number;
+  unrealized_pnl: number;
+  positions: PaperPosition[];
+};
+
+export type PaperOrder = {
+  id: number;
+  account_id: number;
+  asset_id: string;
+  side: "buy" | "sell";
+  order_type: "market";
+  quantity: number;
+  status: "submitted" | "filled" | "rejected";
+  submitted_at: string;
+  filled_at: string | null;
+  reference_price: number;
+  fill_price: number | null;
+  commission: number;
+  slippage: number;
+  note: string;
+};
+
+export type PaperTrade = {
+  id: number;
+  order_id: number;
+  account_id: number;
+  asset_id: string;
+  side: "buy" | "sell";
+  quantity: number;
+  price: number;
+  gross_value: number;
+  costs: number;
+  realized_pnl: number;
+  executed_at: string;
+};
+
+export type PaperJournal = { orders: PaperOrder[]; trades: PaperTrade[] };

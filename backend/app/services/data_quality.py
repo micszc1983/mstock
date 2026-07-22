@@ -398,7 +398,7 @@ def _analyze_sync(db: Session, asset_id: str) -> SyncQuality:
     error_rate = round(len(errors_all_7d) / max(1, total_7d), 3)
 
     last_ok = next(
-        (ensure_utc(l.created_at) for l in logs_7d if l.status == "ok"), None
+        (ensure_utc(l.created_at) for l in logs_7d if l.status in {"ok", "success"}), None
     )
     # Pokaż ostatni prawdziwy błąd konfiguracji, nie rate-limit
     last_error_msg = next(

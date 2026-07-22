@@ -10,10 +10,11 @@ Silnik rekomendacji inwestycyjnych agregujący WSZYSTKIE dostępne sygnały:
   - historyczna jakość tez (directional_accuracy)
   - aktywne alerty (liczba i severity)
 
-Wynik: "KUP" / "SPRZEDAJ" / "TRZYMAJ" z uzasadnieniem.
+Wynik: "KUP" / "SPRZEDAJ" / "TRZYMAJ" / "BRAK TRANSAKCJI" z uzasadnieniem.
 """
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.repositories.assets import get_asset, list_assets
@@ -21,11 +22,21 @@ from app.repositories.alerts import list_alerts_for_asset
 from app.repositories.decision_support import get_latest_decision_snapshot
 from app.repositories.features import get_latest_feature_snapshot
 from app.repositories.forecasts import get_latest_forecasts
-from app.repositories.ml import get_latest_prediction
 from app.repositories.theses import get_latest_thesis
 from app.services.quality_metrics import build_thesis_quality_summary
 from app.schemas.recommendation import AssetRecommendation, SignalContribution, TopPick
 from app.utils.datetime import ensure_utc
+
+
+def _has_open_position(db: Session, asset_id: str) -> bool:
+    from app.db.models import PortfolioPositionORM
+
+    quantity = db.scalar(
+        select(PortfolioPositionORM.quantity)
+        .where(PortfolioPositionORM.asset_id == asset_id)
+        .limit(1)
+    )
+    return bool(quantity and quantity > 0)
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -44,12 +55,13 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
 
     feature = get_latest_feature_snapshot(db, asset_id)
     if feature is None:
+        held = _has_open_position(db, asset_id)
         return AssetRecommendation(
             asset_id=asset_id,
             name=asset_row.name,
             symbol=asset_row.symbol,
             asset_type=asset_row.type,
-            recommendation="TRZYMAJ",
+            recommendation="TRZYMAJ" if held else "BRAK TRANSAKCJI",
             composite_score=50.0,
             confidence=0.0,
             confidence_label="niska",
@@ -75,11 +87,13 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
 
     # ── ML Predictions ─────────────────────────────────────────────────────
     try:
-        ml_5d     = get_latest_prediction(db, asset_id, "target_up_5d")
-        ml_20d    = get_latest_prediction(db, asset_id, "target_up_20d")
-        ml_thesis = get_latest_prediction(db, asset_id, "target_thesis_success")
+        from app.services.ml_activation import get_eligible_prediction
+        ml_5d = get_eligible_prediction(db, asset_id, "target_up_5d")
+        ml_20d = get_eligible_prediction(db, asset_id, "target_up_20d")
+        ml_thesis = get_eligible_prediction(db, asset_id, "target_thesis_success")
+        ml_meta = get_eligible_prediction(db, asset_id, "target_meta_label")
     except Exception:
-        ml_5d = ml_20d = ml_thesis = None
+        ml_5d = ml_20d = ml_thesis = ml_meta = None
 
     # ── Jakość historyczna ─────────────────────────────────────────────────
     try:
@@ -217,26 +231,39 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     normalized = weighted_sum / total_weight if total_weight > 0 else 0.0
     composite = _clamp(50.0 + normalized * 50.0)
 
-    # ── Rekomendacja ───────────────────────────────────────────────────
-    if composite >= 62:
+    # ── Decyzja i confidence z historii out-of-sample ──────────────────
+    from app.services.recommendation_calibration import calibrate_recommendation
+
+    calibrated = calibrate_recommendation(db, asset_row, feature)
+    from app.services.meta_thresholds import calibrated_meta_threshold
+    meta_threshold = calibrated_meta_threshold(db, calibrated.market, feature.regime_label)
+    held = _has_open_position(db, asset_id)
+    if calibrated.action == "BUY":
         recommendation = "KUP"
-    elif composite <= 38:
+    elif calibrated.action == "SELL":
         recommendation = "SPRZEDAJ"
     else:
-        recommendation = "TRZYMAJ"
+        recommendation = "TRZYMAJ" if held else "BRAK TRANSAKCJI"
 
-    # ── Weto ML 20d: bardzo niskie p(up) blokuje KUP / wymusza SPRZEDAJ ──
-    if ml_20d:
-        p20 = ml_20d.probability_up
-        if p20 < 0.30 and recommendation == "KUP":
-            recommendation = "TRZYMAJ"   # nie kupuj gdy ML 20d mocno bearish
-        elif p20 < 0.20:
-            recommendation = "SPRZEDAJ"  # < 20% p(up) = silny sygnał sprzedaży
+    meta_gate_applied = False
+    final_no_trade_reason = calibrated.no_trade_reason
+    if (
+        recommendation in {"KUP", "SPRZEDAJ"}
+        and ml_meta is not None
+        and ml_meta.probability_up < meta_threshold.threshold
+    ):
+        recommendation = "TRZYMAJ" if held else "BRAK TRANSAKCJI"
+        meta_gate_applied = True
+        final_no_trade_reason = (
+            f"Meta-model ocenia opłacalność wykonania na {ml_meta.probability_up * 100:.1f}% "
+            f"przy progu {meta_threshold.threshold * 100:.1f}% ({meta_threshold.scope}) "
+            "i kieruje sygnał do strefy bez transakcji."
+        )
 
-    confidence = abs(composite - 50.0) * 2  # 0-100
-    if confidence >= 60:
+    confidence = calibrated.confidence_probability * 100
+    if confidence >= 70:
         confidence_label = "wysoka"
-    elif confidence >= 30:
+    elif confidence >= 55:
         confidence_label = "średnia"
     else:
         confidence_label = "niska"
@@ -269,11 +296,22 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
             main += f" Czynniki negatywne: {', '.join(bearish_drivers[:3])}."
         if bullish_drivers:
             main += f" Potencjalne wsparcie: {', '.join(bullish_drivers[:2])}."
-    else:
-        main = f"Sygnały są mieszane — brak wyraźnej przewagi."
+    elif recommendation == "TRZYMAJ":
+        main = "Brak przewagi uzasadniającej zmianę już posiadanej pozycji."
         all_drivers = bullish_drivers[:2] + bearish_drivers[:2]
         if all_drivers:
             main += f" Kluczowe czynniki: {', '.join(all_drivers)}."
+    else:
+        main = "Brak transakcji jest obecnie optymalną decyzją."
+        if final_no_trade_reason:
+            main += f" {final_no_trade_reason}"
+
+    main += (
+        f" Kalibracja {calibrated.market}/{calibrated.regime} ({calibrated.scope}, "
+        f"n={calibrated.sample_size}): P(kup)={calibrated.probability_buy * 100:.1f}%, "
+        f"P(sprzedaj)={calibrated.probability_sell * 100:.1f}%, koszt={calibrated.transaction_cost_pct:.2f}%, "
+        f"przewaga netto={calibrated.expected_net_edge_pct:.2f}% ± {calibrated.uncertainty_pct:.2f}%."
+    )
 
     if has_critical:
         main += " ⚠ Aktywny alert wysokiego priorytetu."
@@ -287,6 +325,19 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         composite_score=round(composite, 1),
         confidence=round(confidence, 1),
         confidence_label=confidence_label,
+        market_segment=calibrated.market,
+        calibration_scope=calibrated.scope,
+        calibration_sample_size=calibrated.sample_size,
+        probability_buy=round(calibrated.probability_buy * 100, 1),
+        probability_sell=round(calibrated.probability_sell * 100, 1),
+        probability_no_trade=round(calibrated.probability_no_trade * 100, 1),
+        buy_threshold=round(calibrated.buy_threshold * 100, 1),
+        sell_threshold=round(calibrated.sell_threshold * 100, 1),
+        transaction_cost_pct=round(calibrated.transaction_cost_pct, 3),
+        expected_gross_edge_pct=round(calibrated.expected_gross_edge_pct, 3),
+        expected_net_edge_pct=round(calibrated.expected_net_edge_pct, 3),
+        uncertainty_pct=round(calibrated.uncertainty_pct, 3),
+        no_trade_reason=final_no_trade_reason,
         trend_score=round(feature.trend_score, 1),
         sentiment_score=round(feature.sentiment_score, 1),
         fragility_score=round(feature.fragility_score, 1),
@@ -306,6 +357,11 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
         ml_20d_prediction=ml_20d.predicted_label if ml_20d else None,
         ml_20d_prob_up=round(ml_20d.probability_up * 100, 1) if ml_20d else None,
         ml_thesis_prediction=ml_thesis.predicted_label if ml_thesis else None,
+        ml_meta_prediction=ml_meta.predicted_label if ml_meta else None,
+        meta_trade_probability=round(ml_meta.probability_up * 100, 1) if ml_meta else None,
+        meta_gate_applied=meta_gate_applied,
+        meta_trade_threshold=round(meta_threshold.threshold * 100, 1) if ml_meta else None,
+        meta_threshold_scope=meta_threshold.scope if ml_meta else None,
         directional_accuracy=round(dir_acc * 100, 1) if dir_acc else None,
         active_alerts=len(active),
         has_critical_alert=has_critical,
@@ -334,6 +390,8 @@ def invalidate_recommendations_cache() -> None:
     """Wymuś odświeżenie cache przy następnym wywołaniu (np. po pełnym cyklu schedulera)."""
     global _rec_cache_ts
     _rec_cache_ts = 0.0
+    from app.services.recommendation_calibration import invalidate_calibration_cache
+    invalidate_calibration_cache()
 
 
 def build_all_recommendations(db: Session) -> list[AssetRecommendation]:
@@ -353,7 +411,7 @@ def build_all_recommendations(db: Session) -> list[AssetRecommendation]:
             rec = build_recommendation(db, asset.id)
             if rec is not None:
                 results.append(rec)
-        order = {"KUP": 0, "TRZYMAJ": 1, "SPRZEDAJ": 2}
+        order = {"KUP": 0, "TRZYMAJ": 1, "BRAK TRANSAKCJI": 2, "SPRZEDAJ": 3}
         results.sort(key=lambda r: (order.get(r.recommendation, 1), -r.composite_score))
 
         _rec_cache = results
@@ -364,7 +422,7 @@ def build_all_recommendations(db: Session) -> list[AssetRecommendation]:
 # ── Top Picks ─────────────────────────────────────────────────────────────────
 
 _SIGNAL_CHECKS: list[tuple[str, str]] = [
-    ("composite_score >= 65",      "Silny wynik kompozytowy (≥65)"),
+    ("calibrated_edge",            "Przewaga netto pokrywa niepewność"),
     ("conviction_score >= 60",     "Wysokie przekonanie (≥60)"),
     ("risk_score <= 40",           "Niskie ryzyko (≤40)"),
     ("ml_prediction == up",        "ML 5d: wzrost"),
@@ -377,8 +435,8 @@ _SIGNAL_CHECKS: list[tuple[str, str]] = [
 
 
 def _check_signal(rec: AssetRecommendation, check: str) -> bool:
-    if check == "composite_score >= 65":
-        return rec.composite_score >= 65
+    if check == "calibrated_edge":
+        return rec.expected_net_edge_pct > rec.uncertainty_pct
     if check == "conviction_score >= 60":
         return rec.conviction_score is not None and rec.conviction_score >= 60
     if check == "risk_score <= 40":
@@ -399,34 +457,7 @@ def _check_signal(rec: AssetRecommendation, check: str) -> bool:
 
 
 def _compute_certainty(rec: AssetRecommendation) -> float:
-    weighted: list[tuple[float, float]] = []
-
-    weighted.append((rec.composite_score, 0.22))
-
-    if rec.conviction_score is not None:
-        weighted.append((rec.conviction_score, 0.18))
-
-    if rec.risk_score is not None:
-        weighted.append((100.0 - rec.risk_score, 0.15))
-
-    if rec.ml_prob_up is not None:
-        weighted.append((rec.ml_prob_up, 0.18))
-
-    if rec.ml_20d_prob_up is not None:
-        weighted.append((rec.ml_20d_prob_up, 0.08))
-
-    if rec.forecast_up_5d is not None:
-        weighted.append((rec.forecast_up_5d, 0.09))
-
-    if rec.forecast_up_20d is not None:
-        weighted.append((rec.forecast_up_20d, 0.05))
-
-    weighted.append((max(0.0, min(100.0, rec.trend_score / 2.0 + 50.0)), 0.05))
-
-    total_w = sum(w for _, w in weighted)
-    if total_w == 0:
-        return 0.0
-    return round(sum(v * w for v, w in weighted) / total_w, 1)
+    return rec.confidence
 
 
 def build_top_picks(db: Session, min_signals: int = 6) -> list[TopPick]:
@@ -434,9 +465,8 @@ def build_top_picks(db: Session, min_signals: int = 6) -> list[TopPick]:
     Zwraca aktywa gdzie wszystkie kluczowe sygnały są zgodne (bullish).
     Minimalne wymagania:
       - recommendation == "KUP"
-      - composite_score >= 65
       - co najmniej min_signals z 9 sygnałów zgodnych
-      - certainty_score >= 62
+      - historycznie skalibrowane confidence >= 62%
     """
     picks: list[TopPick] = []
 
@@ -446,9 +476,6 @@ def build_top_picks(db: Session, min_signals: int = 6) -> list[TopPick]:
             continue
         if rec.recommendation != "KUP":
             continue
-        if rec.composite_score < 65:
-            continue
-
         aligned, missing = [], []
         for check, label in _SIGNAL_CHECKS:
             if _check_signal(rec, check):

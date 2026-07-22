@@ -288,6 +288,7 @@ def compute_all(
 
     macro_data    — słownik {date: {vix, treasury_10y, dxy}} z fetch_macro_data()
     sector_closes — lista cen zamknięcia ETF sektora (SOXX/QQQ), posortowana rosnąco
+    asset_return_5d — wyłącznie znany w snap_date zwrot T-5..T (nigdy target T..T+5)
     """
     spy_ret = spy_returns.get(snap_date, None)
 

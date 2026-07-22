@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { api, setApiBaseUrl } from "./lib/api";
+import { adminHeaders, api, setApiBaseUrl } from "./lib/api";
 import { formatPct, formatRatio, titleize } from "./lib/format";
 import type {
   AlertItem,
@@ -46,6 +46,7 @@ import type {
   WalkForwardBacktest,
   Watchlist,
   MLModelComparison,
+  MLMonitor,
   EarningsCalendarResponse,
   EarningsRecord,
   EarningsCallAnalysis,
@@ -69,7 +70,10 @@ import { PageContainer, Section } from "./components/Layout";
 import { MetaRow, Panel, Pill } from "./components/Panel";
 import { Portfolio } from "./components/Portfolio";
 import { IntradayTab } from "./components/IntradayTab";
+import { SimulatorTab } from "./components/SimulatorTab";
 import { AlertsConfigTab } from "./components/AlertsConfigTab";
+import { PaperTradingTab } from "./components/PaperTradingTab";
+import { CalibrationAuditTab } from "./components/CalibrationAuditTab";
 
 function humanizeError(message: string) {
   const lower = message.toLowerCase();
@@ -95,14 +99,42 @@ const ML_TARGETS = [
   { value: "target_up_5d",          label: "Kierunek 5d",       description: "Czy cena wzrośnie w ciągu 5 dni?" },
   { value: "target_up_20d",         label: "Kierunek 20d",      description: "Czy cena wzrośnie w ciągu 20 dni?" },
   { value: "target_thesis_success", label: "Skuteczność tezy",  description: "Czy teza okazała się kierunkowo poprawna po 5 dniach?" },
+  { value: "target_triple_barrier", label: "Triple barrier", description: "Czy pierwsza zostanie osiągnięta bariera zysku czy straty?" },
+  { value: "target_meta_label", label: "Meta: trade/skip", description: "Czy sygnał bazowy ma przewagę po kosztach?" },
 ] as const;
+
+const SELECTED_ASSET_STORAGE_KEY = "mstock-selected-asset";
+
+function initialSelectedAsset() {
+  try {
+    return window.localStorage.getItem(SELECTED_ASSET_STORAGE_KEY) || "nvda";
+  } catch {
+    return "nvda";
+  }
+}
+
+function mlPositive(label: string | null | undefined) {
+  return ["up", "upper", "trade"].includes(label?.toLowerCase() ?? "");
+}
+
+function mlVerdict(target: string, positive: boolean) {
+  if (target === "target_meta_label") return positive ? "TRADE" : "SKIP";
+  if (target === "target_triple_barrier") return positive ? "GÓRNA BARIERA" : "DOLNA BARIERA";
+  return positive ? "WZROST" : "SPADEK";
+}
+
+function mlProbabilityName(target: string) {
+  if (target === "target_meta_label") return "p(trade)";
+  if (target === "target_triple_barrier") return "p(górna bariera)";
+  return "p(wzrost)";
+}
 
 export default function App() {
   const [apiBase, setApiBase] = useState(api.apiBase);
   const updateApiBase = (url: string) => { setApiBase(url); setApiBaseUrl(url); };
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [selectedAsset, setSelectedAsset] = useState("nvda");
-  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "quality" | "theses" | "portfolio" | "earnings" | "insider" | "toppicks" | "intraday" | "alerts-config">("analysis");
+  const [selectedAsset, setSelectedAsset] = useState(initialSelectedAsset);
+  const [activeTab, setActiveTab] = useState<"analysis" | "recommendations" | "calibration" | "quality" | "theses" | "portfolio" | "earnings" | "insider" | "toppicks" | "intraday" | "simulator" | "paper" | "alerts-config">("analysis");
   const [loading, setLoading] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -139,6 +171,7 @@ export default function App() {
   );
   const [mlExplanation, setMlExplanation] = useState<MLExplanation | null>(null);
   const [mlComparison, setMlComparison] = useState<MLModelComparison[]>([]);
+  const [mlMonitoring, setMlMonitoring] = useState<MLMonitor[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [recommendations, setRecommendations] = useState<AssetRecommendation[]>([]);
   const [dataQuality, setDataQuality] = useState<DataQualityReport | null>(null);
@@ -202,6 +235,15 @@ export default function App() {
       .catch((err) => setError(humanizeError(String(err))));
   }, [selectedAsset]);
 
+  useEffect(() => {
+    if (!selectedAsset) return;
+    try {
+      window.localStorage.setItem(SELECTED_ASSET_STORAGE_KEY, selectedAsset);
+    } catch {
+      // Aplikacja pozostaje używalna również przy zablokowanym localStorage.
+    }
+  }, [selectedAsset]);
+
   const selectedMeta = useMemo(
     () => assets.find((asset) => asset.id === selectedAsset) ?? null,
     [assets, selectedAsset]
@@ -213,7 +255,7 @@ export default function App() {
     setInfo("");
     setError("");
     try {
-      const res = await fetch(`${apiBase}/admin/run-pipeline`, { method: "POST" });
+      const res = await fetch(`${apiBase}/admin/run-pipeline`, { method: "POST", headers: adminHeaders() });
       const body = await res.json().catch(() => ({}));
       if (res.status === 409) {
         setInfo("Sync już trwa — poczekaj na zakończenie bieżącego cyklu.");
@@ -236,6 +278,13 @@ export default function App() {
     setLoading(true);
     setError("");
     setInfo("");
+
+    // Lista aktywów używa rekomendacji do ikon stanu/prognozy. Ładuj ją
+    // niezależnie od cięższych paneli ML, aby symbole pojawiały się od razu.
+    void api.recommendations()
+      .then(setRecommendations)
+      .catch(() => {});
+    void api.mlMonitoring().then(setMlMonitoring).catch(() => {});
 
     try {
       // ── Faza 1: dane kluczowe — renderuje UI jak najszybciej ─────────────────
@@ -313,7 +362,6 @@ export default function App() {
         currentInsiderTrades,
         currentShortInterest,
         currentTopPicks,
-        currentRecommendations,
         currentMlExplanation,
       ] = await Promise.all([
         api.notificationEvents().catch(() => []),
@@ -336,7 +384,6 @@ export default function App() {
         api.insiderTrades(selectedAsset).catch(() => []),
         api.shortInterest(selectedAsset).catch(() => []),
         api.topPicks().catch(() => []),
-        api.recommendations().catch(() => []),
         api.mlExplain(selectedAsset, mlActiveTarget).catch(() => null),
       ]);
 
@@ -357,7 +404,6 @@ export default function App() {
       setInsiderTrades(currentInsiderTrades);
       setShortInterest(currentShortInterest);
       setTopPicks(currentTopPicks);
-      setRecommendations(currentRecommendations);
       setMlExplanation(currentMlExplanation);
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
@@ -394,9 +440,13 @@ export default function App() {
 
   async function toggleMlMode() {
     try {
-      const next = !(mlStatus?.ml_enabled ?? false);
-      const result = await api.setMlMode(next);
-      setInfo(`Tryb przełączony na: ${result.ml_mode === "ml" ? "ML" : "Heurystyka"}.`);
+      const removeEmergencyBlock = mlStatus?.emergency_disabled ?? false;
+      const result = await api.setMlMode(removeEmergencyBlock);
+      setInfo(
+        result.emergency_disabled
+          ? "Włączono awaryjną blokadę ML. Modele nadal pracują w shadow."
+          : "Wyłączono awaryjną blokadę. Aktywacja modeli pozostaje automatyczna."
+      );
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
@@ -529,6 +579,22 @@ export default function App() {
       await refresh();
     } catch (err) {
       setError(humanizeError(err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function runMlMonitoringNow() {
+    setMlWorking("Monitoring driftu i wyników modeli…");
+    try {
+      const rows = await api.runMlMonitoring();
+      setMlMonitoring(rows);
+      const degraded = rows.filter(row => row.is_degraded).length;
+      const rollbacks = rows.filter(row => row.action === "rollback").length;
+      setInfo(`Monitoring: ${rows.length} modeli, degradacja ${degraded}, rollback ${rollbacks}.`);
+      await refresh();
+    } catch (err) {
+      setError(humanizeError(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setMlWorking(null);
     }
   }
 
@@ -771,7 +837,7 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładki ─────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "0.25rem", margin: "0.6rem 0 0.2rem", borderBottom: "2px solid var(--border)" }}>
-        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["toppicks", "⭐ Top Picks"], ["intraday", "📈 Intraday"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"], ["alerts-config", "🔔 Alerty SMS"]] as const).map(([id, label]) => (
+        {([["analysis", "Analizy"], ["recommendations", "Rekomendacje"], ["calibration", "Kalibracja"], ["toppicks", "⭐ Top Picks"], ["intraday", "📈 Intraday"], ["simulator", "📊 Symulator"], ["paper", "🧾 Paper trading"], ["quality", "Jakość danych"], ["theses", "Tezy"], ["earnings", "Wyniki spółek"], ["insider", "Insider & Short"], ["portfolio", "Portfel"], ["alerts-config", "🔔 Alerty SMS"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -900,7 +966,7 @@ async function notifyFirstEmail() {
       <div className="toolbar-row">
         <button className="secondary-button" onClick={toggleMlMode}>
           <WandSparkles size={16} />
-          {mlStatus?.ml_enabled ? "Przełącz na heurystykę" : "Przełącz na ML"}
+          {mlStatus?.emergency_disabled ? "Odblokuj automat ML" : "Awaryjnie wyłącz ML"}
         </button>
         <button className="secondary-button" onClick={buildMlDatasetNow} disabled={!!mlWorking}>
           <Rows3 size={16} />
@@ -929,6 +995,10 @@ async function notifyFirstEmail() {
         <button className="secondary-button" onClick={rescoreMlNow}>
           <ActivitySquare size={16} />
           Przelicz predykcję ML
+        </button>
+        <button className="secondary-button" onClick={runMlMonitoringNow} disabled={!!mlWorking}>
+          <ShieldAlert size={16} />
+          Monitoruj drift
         </button>
         <label
           data-tip="Optuna przeszuka przestrzeń hiperparametrów (30 prób, 3-fold CV jako cel) i wybierze najlepsze C, max_depth, learning_rate itp. przed treningiem finalnym. Trwa dłużej (~1-3 min per model)."
@@ -1014,7 +1084,7 @@ async function notifyFirstEmail() {
         // ── Oblicz akcję ─────────────────────────────────────────────────────
         const conviction = rec.conviction_score ?? 50;
         const riskScore  = rec.risk_score ?? 50;
-        const reco       = rec.recommendation;        // KUP | SPRZEDAJ | TRZYMAJ
+        const reco       = rec.recommendation;
         const ensDir     = ensembleSignal?.final_direction ?? null;
         const ensConf    = ensembleSignal?.final_confidence ?? 0;
 
@@ -1053,7 +1123,8 @@ async function notifyFirstEmail() {
             myPos.avg_buy_price != null
               ? `Twoja pozycja: ${myPos.quantity} szt. śr. po ${myPos.avg_buy_price.toFixed(2)} ${selectedMeta?.currency ?? ""}`
               : `Twoja pozycja: ${myPos.quantity} szt.`,
-            `Rekomendacja systemu: ${reco} (conviction ${conviction.toFixed(0)}%, ryzyko ${riskScore.toFixed(0)}%)`,
+            `Rekomendacja systemu: ${reco} (historyczne P=${rec.confidence.toFixed(1)}%, próba n=${rec.calibration_sample_size})`,
+            `Przewaga netto: ${rec.expected_net_edge_pct.toFixed(2)}% ± ${rec.uncertainty_pct.toFixed(2)}%, koszt: ${rec.transaction_cost_pct.toFixed(2)}%`,
             ensDir ? `Sygnał ensemble: ${ensDir === "up" ? "▲ wzrostowy" : "▼ spadkowy"} (pewność ${(ensConf).toFixed(0)}%)` : "",
             rec.forecast_dir_5d ? `Prognoza 5d: ${rec.forecast_dir_5d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
             rec.forecast_dir_20d ? `Prognoza 20d: ${rec.forecast_dir_20d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
@@ -1068,6 +1139,10 @@ async function notifyFirstEmail() {
             action = "buy"; actionLabel = "WEJŚCIE WARUNKOWE";
             actionColor = "#22c55e"; actionBg = "rgba(34,197,94,0.08)";
             headline = "Sygnał kupna, ale czekaj na dalsze potwierdzenie";
+          } else if (reco === "BRAK TRANSAKCJI") {
+            action = "watch"; actionLabel = "BRAK TRANSAKCJI";
+            actionColor = "#64748b"; actionBg = "rgba(100,116,139,0.08)";
+            headline = "Przewaga nie pokrywa kosztów i niepewności — pozostań poza rynkiem";
           } else if (reco === "TRZYMAJ") {
             action = "watch"; actionLabel = "OBSERWUJ";
             actionColor = "#6366f1"; actionBg = "rgba(99,102,241,0.07)";
@@ -1079,7 +1154,8 @@ async function notifyFirstEmail() {
           }
           bullets = [
             `Aktywo: ${selectedMeta?.symbol} — ${selectedMeta?.name ?? ""}`,
-            `Rekomendacja: ${reco} (conviction ${conviction.toFixed(0)}%, ryzyko ${riskScore.toFixed(0)}%)`,
+            `Rekomendacja: ${reco} (historyczne P=${rec.confidence.toFixed(1)}%, próba n=${rec.calibration_sample_size})`,
+            `Przewaga netto: ${rec.expected_net_edge_pct.toFixed(2)}% ± ${rec.uncertainty_pct.toFixed(2)}%, koszt: ${rec.transaction_cost_pct.toFixed(2)}%`,
             ensDir ? `Sygnał ensemble: ${ensDir === "up" ? "▲ wzrostowy" : "▼ spadkowy"} (pewność ${(ensConf).toFixed(0)}%)` : "",
             rec.forecast_dir_5d ? `Prognoza 5d: ${rec.forecast_dir_5d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
             rec.forecast_dir_20d ? `Prognoza 20d: ${rec.forecast_dir_20d === "up" ? "▲ wzrost" : "▼ spadek"}` : "",
@@ -1165,7 +1241,8 @@ async function notifyFirstEmail() {
             const rec    = recommendations.find(r => r.asset_id === selectedAsset) ?? null;
             const recKey = rec?.recommendation === "KUP" ? "buy" : rec?.recommendation === "SPRZEDAJ" ? "sell" : "hold";
             const mlDir  = mlPrediction?.predicted_label?.toLowerCase() ?? null;
-            const mlKey  = mlDir === "up" ? "buy" : mlDir === "down" ? "sell" : "hold";
+            const mlIsPositive = mlPrediction ? mlPositive(mlDir) : false;
+            const mlKey  = mlPrediction ? (mlIsPositive ? "buy" : "sell") : "hold";
             const ensAct = ensembleSignal?.action ?? null;
             const ensKey = ensAct === "KUP" ? "buy" : ensAct === "SPRZEDAJ" ? "sell" : "hold";
 
@@ -1175,8 +1252,9 @@ async function notifyFirstEmail() {
               hold: { bg: "var(--bg-card)",         border: "var(--border)",          text: "var(--text-2)" },
             };
 
-            const mlLabel   = mlActiveTarget === "target_up_5d" ? "5d" : mlActiveTarget === "target_up_20d" ? "20d" : "teza";
-            const mlVerdict = mlDir === "up" ? "WZROST" : mlDir === "down" ? "SPADEK" : "—";
+            const mlLabel = ML_TARGETS.find(t => t.value === mlActiveTarget)?.label ?? mlActiveTarget;
+            const mlVerdictText = mlPrediction ? mlVerdict(mlActiveTarget, mlIsPositive) : "—";
+            const mlProbName = mlProbabilityName(mlActiveTarget);
 
             function SignalBox({ colorKey, title, verdict, detail, tooltip }: {
               colorKey: string; title: string; verdict: string; detail: string; tooltip: string;
@@ -1214,9 +1292,9 @@ async function notifyFirstEmail() {
                 <SignalBox
                   colorKey={mlKey}
                   title={`ML · ${mlLabel}`}
-                  verdict={mlVerdict}
-                  detail={mlPrediction ? `p(wzrost) = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "brak predykcji"}
-                  tooltip={mlPrediction ? `Cel: ${mlPrediction.target_name} | p(up) = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "Brak predykcji ML — wytrenuj modele"}
+                  verdict={mlVerdictText}
+                  detail={mlPrediction ? `${mlProbName} = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "brak predykcji"}
+                  tooltip={mlPrediction ? `Cel: ${mlPrediction.target_name} | ${mlProbName} = ${(mlPrediction.probability_up * 100).toFixed(1)}%` : "Brak predykcji ML — wytrenuj modele"}
                 />
                 <SignalBox
                   colorKey={ensKey}
@@ -1284,11 +1362,13 @@ async function notifyFirstEmail() {
               <div style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.25rem" }}>{t.target_label}</div>
               <div style={{ fontSize: "0.75rem", color: "var(--text-2)" }}>
                 {t.is_trained
-                  ? <span style={{ color: "#16a34a" }}>✓ Wytrenowany — {t.model_name}</span>
+                  ? <span style={{ color: t.activation_state === "eligible" ? "#16a34a" : t.activation_state === "degraded" ? "#dc2626" : "#d97706" }}>
+                      {t.activation_state === "eligible" ? "✓ Live" : t.activation_state === "degraded" ? "⚠ Degradacja" : t.activation_state === "partial" ? "◐ Częściowo live" : "◌ Shadow"} — {t.model_name}
+                    </span>
                   : <span style={{ color: "var(--text-3)" }}>Brak modelu</span>}
               </div>
               <div style={{ fontSize: "0.72rem", color: "var(--text-2)", marginTop: "0.15rem" }}>
-                {t.dataset_rows} oznaczonych wierszy
+                {t.dataset_rows} wierszy · live {t.eligible_models}/{t.active_models}
               </div>
             </div>
           ))}
@@ -1300,9 +1380,14 @@ async function notifyFirstEmail() {
           padding: "0.55rem 0.9rem", borderRadius: "8px", marginBottom: "1rem",
           background: "var(--bg-card)", border: "1px solid var(--border)", fontSize: "0.8rem",
         }}>
-          <span title="Aktywny tryb: ml lub heuristic">
+          <span title="Tryb jest wyznaczany automatycznie osobno dla każdego modelu">
             <span style={{ color: "var(--text-2)" }}>tryb </span>
             <strong style={{ color: mlStatus?.ml_enabled ? "#16a34a" : "var(--text)" }}>{mlStatus?.ml_mode ?? "—"}</strong>
+          </span>
+          <span title="Modele dopuszczone do rekomendacji / wszystkie aktywne championy">
+            <span style={{ color: "var(--text-2)" }}>live </span>
+            <strong>{mlStatus?.eligible_models ?? 0}/{mlStatus?.active_models ?? 0}</strong>
+            <span style={{ color: "var(--text-3)" }}> · shadow {mlStatus?.shadow_models ?? 0} · degraded {mlStatus?.degraded_models ?? 0}</span>
           </span>
           <span title="Łączna liczba wierszy w datasecie treningowym">
             <span style={{ color: "var(--text-2)" }}>wierszy </span>
@@ -1318,6 +1403,11 @@ async function notifyFirstEmail() {
             <span title="target_up_20d">20d: <strong>{mlDatasetStats?.labeled_rows_20d ?? 0}</strong></span>
             {" · "}
             <span title="target_thesis_success">teza: <strong>{mlDatasetStats?.thesis_success_rows ?? 0}</strong></span>
+            {" · "}
+            <span title="target_triple_barrier">3B: <strong>{mlDatasetStats?.triple_barrier_rows ?? 0}</strong></span>
+            {" · "}
+            <span title="target_meta_label">meta: <strong>{mlDatasetStats?.meta_label_rows ?? 0}</strong></span>
+            <span title="Meta-label wygenerowany przez primary model out-of-fold">OOF: <strong>{mlDatasetStats?.oof_meta_label_rows ?? 0}</strong></span>
           </span>
           {availableModels.length > 0 && (
             <span title="Typy modeli dostępne do treningu (zainstalowane pakiety)">
@@ -1341,15 +1431,15 @@ async function notifyFirstEmail() {
                 <div style={{
                   display: "flex", alignItems: "center", gap: "0.75rem",
                   padding: "0.6rem 0.8rem", borderRadius: "8px",
-                  background: mlExplanation.predicted_label === "up" ? "rgba(22,163,74,0.08)" : "rgba(220,38,38,0.08)",
-                  border: `1.5px solid ${mlExplanation.predicted_label === "up" ? "#16a34a" : "#dc2626"}`,
+                  background: mlPositive(mlExplanation.predicted_label) ? "rgba(22,163,74,0.08)" : "rgba(220,38,38,0.08)",
+                  border: `1.5px solid ${mlPositive(mlExplanation.predicted_label) ? "#16a34a" : "#dc2626"}`,
                 }}>
-                  <span style={{ fontSize: "1.5rem", fontWeight: 700, color: mlExplanation.predicted_label === "up" ? "#16a34a" : "#dc2626" }}>
-                    {mlExplanation.predicted_label === "up" ? "▲" : "▼"}
+                  <span style={{ fontSize: "1.5rem", fontWeight: 700, color: mlPositive(mlExplanation.predicted_label) ? "#16a34a" : "#dc2626" }}>
+                    {mlPositive(mlExplanation.predicted_label) ? "▲" : "▼"}
                   </span>
                   <div>
-                    <div style={{ fontWeight: 600, fontSize: "0.9rem", color: mlExplanation.predicted_label === "up" ? "#16a34a" : "#dc2626" }}>
-                      {mlExplanation.predicted_label === "up" ? "BULLISH" : "BEARISH"}{" — "}{(mlExplanation.probability_up * 100).toFixed(1)}% p(up)
+                    <div style={{ fontWeight: 600, fontSize: "0.9rem", color: mlPositive(mlExplanation.predicted_label) ? "#16a34a" : "#dc2626" }}>
+                      {mlVerdict(mlActiveTarget, mlPositive(mlExplanation.predicted_label))}{" — "}{(mlExplanation.probability_up * 100).toFixed(1)}% {mlProbabilityName(mlActiveTarget)}
                     </div>
                     <div style={{ fontSize: "0.8rem", color: "var(--text-2)", marginTop: "0.2rem" }}>
                       {mlExplanation.interpretation}
@@ -1398,7 +1488,7 @@ async function notifyFirstEmail() {
             ) : mlPrediction ? (() => {
               const label = mlPrediction.predicted_label;
               const probUp = mlPrediction.probability_up;
-              const isUp = label === "up";
+              const isUp = mlPositive(label);
               const col = isUp ? "#16a34a" : "#dc2626";
               const bg = isUp ? "rgba(22,163,74,0.08)" : "rgba(220,38,38,0.08)";
               let modelsUsed: string[] = [];
@@ -1412,7 +1502,7 @@ async function notifyFirstEmail() {
                     <span style={{ fontSize: "1.5rem", fontWeight: 700, color: col }}>{isUp ? "▲" : "▼"}</span>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: "0.9rem", color: col }}>
-                        {isUp ? "BULLISH" : "BEARISH"}{" — "}{(probUp * 100).toFixed(1)}% p(up)
+                        {mlVerdict(mlActiveTarget, isUp)}{" — "}{(probUp * 100).toFixed(1)}% {mlProbabilityName(mlActiveTarget)}
                       </div>
                       <div style={{ fontSize: "0.8rem", color: "var(--text-2)", marginTop: "0.2rem" }}>
                         {new Date(mlPrediction.snapshot_at).toLocaleString("pl-PL")}
@@ -1434,16 +1524,34 @@ async function notifyFirstEmail() {
           <Panel title="Rejestr modeli">
             <DataTable
               maxRows={12}
-              columns={["Aktywo","Cel","Model","Wierszy","Aktywny","Wytrenowano"]}
+              columns={["Aktywo","Cel","Model","Rola","Wierszy","Aktywny","Wytrenowano"]}
               rows={mlModelsState.map((row) => ({
                 "Aktywo": row.asset_id
                   ? (assets.find(a => a.id === row.asset_id)?.name ?? row.asset_id)
-                  : "Globalny",
+                  : row.market_segment ? `Rynek ${row.market_segment}` : "Globalny",
                 "Cel": row.target_name,
                 "Model": row.model_name,
+                "Rola": row.deployment_role,
                 "Wierszy": String(row.dataset_rows),
                 "Aktywny": row.is_active ? "✓" : "—",
                 "Wytrenowano": new Date(row.trained_at).toLocaleDateString("pl-PL"),
+              }))}
+            />
+          </Panel>
+
+          <Panel title="Monitoring modeli">
+            <DataTable
+              maxRows={12}
+              columns={["Zakres","PSI","Kalibracja","Zwrot netto","PF","N","Stan","Akcja"]}
+              rows={mlMonitoring.map(row => ({
+                "Zakres": row.asset_id ?? row.market_segment ?? "global",
+                "PSI": row.feature_psi?.toFixed(3) ?? "—",
+                "Kalibracja": row.calibration_error?.toFixed(3) ?? "—",
+                "Zwrot netto": row.recent_avg_net_return_pct != null ? `${row.recent_avg_net_return_pct.toFixed(2)}%` : "—",
+                "PF": row.recent_profit_factor?.toFixed(2) ?? "—",
+                "N": String(row.sample_size),
+                "Stan": row.is_degraded ? "⚠ degradacja" : "✓ stabilny",
+                "Akcja": row.action,
               }))}
             />
           </Panel>
@@ -1519,8 +1627,8 @@ async function notifyFirstEmail() {
             const long = MODEL_LONG[mn] ?? mn;
             colGroups.push({ col: `${s}_acc`,    label: `${s} Acc`,    tooltip: `${long}\n\nAccuracy na zbiorze testowym (20% danych). Jak często model ma rację.` });
             colGroups.push({ col: `${s}_f1`,     label: `${s} F1`,     tooltip: `${long}\n\nF1 na zbiorze testowym. Lepszy od Accuracy przy niezbalansowanych klasach.` });
-            colGroups.push({ col: `${s}_cv_acc`, label: `${s} CV Acc`, tooltip: `${long}\n\nStratified 5-Fold CV Accuracy — uśredniona po 5 foldach na całym datasecie. Bardziej wiarygodna niż jednokrotny split testowy.`, isCV: true });
-            colGroups.push({ col: `${s}_cv_f1`,  label: `${s} CV F1`,  tooltip: `${long}\n\nStratified 5-Fold CV F1 — uśredniona po 5 foldach. ±std dostępne po najechaniu.`, isCV: true });
+            colGroups.push({ col: `${s}_cv_acc`, label: `${s} CV Acc`, tooltip: `${long}\n\nPurged temporal CV Accuracy — sesje są grupowane, a pomiędzy treningiem i testem pozostaje purge zależny od horyzontu.`, isCV: true });
+            colGroups.push({ col: `${s}_cv_f1`,  label: `${s} CV F1`,  tooltip: `${long}\n\nPurged temporal CV F1 — bez losowego mieszania przyszłości z przeszłością. ±std dostępne po najechaniu.`, isCV: true });
           }
 
           return (
@@ -1531,7 +1639,7 @@ async function notifyFirstEmail() {
                 <div style={{ maxHeight: "22rem", overflowY: "auto", overflowX: "auto" }}>
                   {mlComparison.some(r => r.is_global) && (
                     <div style={{ fontSize: "0.72rem", color: "var(--text-3)", marginBottom: "0.3rem" }}>
-                      * model globalny (wytrenowany na wszystkich aktywach łącznie, brak modelu per-aktywo)
+                      * model rynku/globalny użyty, gdy brak bezpiecznego modelu per-aktywo
                     </div>
                   )}
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -1816,7 +1924,7 @@ async function notifyFirstEmail() {
       {activeTab === "recommendations" && <>
       <Section
         title="Tabela rekomendacji"
-        subtitle="Syntetyczna rekomendacja KUP / SPRZEDAJ / TRZYMAJ dla każdego aktywa na podstawie wszystkich dostępnych sygnałów."
+        subtitle="Decyzje KUP / SPRZEDAJ / TRZYMAJ / BRAK TRANSAKCJI skalibrowane historycznie osobno dla rynku i reżimu."
       >
         {recommendations.length === 0 ? (
           <p className="long-text">Brak danych. Kliknij Odśwież aby załadować rekomendacje.</p>
@@ -1827,9 +1935,11 @@ async function notifyFirstEmail() {
                 <tr style={{ borderBottom: "2px solid var(--border)" }}>
                   {[
                     ["Aktywo","symbol","Symbol giełdowy i nazwa spółki"],
-                    ["Rekomendacja","recommendation","Syntetyczna rekomendacja: KUP (composite>62), SPRZEDAJ (<38), TRZYMAJ (środek). Wynika z 13 ważonych sygnałów."],
-                    ["Wynik","composite_score","Wynik kompozytowy 0–100. Powyżej 62 = KUP, poniżej 38 = SPRZEDAJ. Ważona suma: trend 18%, prognoza 5d 15%, conviction 12%, ryzyko 10% i inne."],
-                    ["Pewność","confidence","Odległość od neutralnego 50 w obie strony. 100% = maksymalna pewność kierunku, 0% = brak sygnału."],
+                    ["Rekomendacja","recommendation","Decyzja po odjęciu kosztów i uwzględnieniu niepewności. BRAK TRANSAKCJI oznacza, że żadna strona nie ma wystarczającej przewagi."],
+                    ["Wynik","composite_score","Surowy wynik diagnostyczny dawnych sygnałów 0–100. Nie wyznacza już progów decyzji."],
+                    ["Pewność","confidence","Historycznie skalibrowane prawdopodobieństwo trafności wybranej decyzji, liczone out-of-sample dla GPW/USA i bieżącego reżimu."],
+                    ["Przewaga","expected_net_edge_pct","Oczekiwany zwrot kierunkowy po odjęciu kosztu transakcji. Transakcja wymaga przewagi większej od błędu statystycznego."],
+                    ["Kalibracja","calibration_sample_size","Segment rynku, zakres kalibracji oraz liczba historycznych obserwacji."],
                     ["Trend","trend_score","Siła trendu cenowego od −100 (silny spadek) do +100 (silny wzrost). Liczone z EMA20/50/200 i momentum."],
                     ["Sent.","sentiment_score","Wynik sentymentu newsów od −100 do +100. Bazuje na NLP (FinBERT lub heurystyka keyword-based)."],
                     ["Kruchość","fragility_score","Miara niestabilności układu — wysokość wahań, rozbieżność sygnałów, zmienność sentymentu. >60 = ostrzeżenie."],
@@ -1839,6 +1949,7 @@ async function notifyFirstEmail() {
                     ["Conv.","conviction_score","Conviction score z decision support 0–100. Siła przekonania o kierunku ruchu — im wyższy tym bardziej zdecydowany sygnał."],
                     ["Ryzyko","risk_score","Poziom ryzyka 0–100 z decision support. Wyższy = bardziej niebezpieczna pozycja. Uwzględnia kruchość, zmienność i dywergencje."],
                     ["ML 5d","ml_prob_up","Prawdopodobieństwo wzrostu za 5 dni wg modelu ML (Logistic Regression). Dostępne po wytrenowaniu modelu."],
+                    ["Meta","meta_trade_probability","Skalibrowane P(opłacalnej transakcji) i dynamiczny próg uczony osobno dla rynku oraz reżimu."],
                     ["IV","implied_volatility","Implied Volatility (zmienność implikowana) opcji ATM z najbliższej serii. Wysoka IV (>40%) = rynek wycenia duże ryzyko. Niska IV (<15%) = spokój. Dostępna tylko dla US stocks i ETF."],
                     ["P/C","put_call_ratio","Put/Call Ratio — stosunek wolumenu put do call. >1.0 = dominacja put (niedźwiedzie), <0.5 = dominacja call (byki). Neutralnie ~0.7."],
                     ["Trafn. hist.","directional_accuracy","Historyczna trafność kierunkowa tez dla tego aktywa w %. Liczone z zamkniętych outcomes. >55% = model działa."],
@@ -1852,8 +1963,8 @@ async function notifyFirstEmail() {
               </thead>
               <tbody>
                 {sortedRows("recommendations", recommendations as unknown as Record<string,unknown>[]).map((r_raw) => { const r = r_raw as typeof recommendations[0];
-                  const recColor = r.recommendation === "KUP" ? "#16a34a" : r.recommendation === "SPRZEDAJ" ? "#dc2626" : "#b45309";
-                  const recBg   = r.recommendation === "KUP" ? "rgba(22,163,74,0.08)" : r.recommendation === "SPRZEDAJ" ? "rgba(220,38,38,0.08)" : "rgba(180,87,9,0.07)";
+                  const recColor = r.recommendation === "KUP" ? "#16a34a" : r.recommendation === "SPRZEDAJ" ? "#dc2626" : r.recommendation === "TRZYMAJ" ? "#b45309" : "#64748b";
+                  const recBg   = r.recommendation === "KUP" ? "rgba(22,163,74,0.08)" : r.recommendation === "SPRZEDAJ" ? "rgba(220,38,38,0.08)" : r.recommendation === "TRZYMAJ" ? "rgba(180,87,9,0.07)" : "rgba(100,116,139,0.08)";
                   const scoreBar = (val: number, neutral = 50) => {
                     const pct = Math.abs(val - neutral) / neutral * 100;
                     const col = val > neutral ? "#16a34a" : "#dc2626";
@@ -1902,6 +2013,16 @@ async function notifyFirstEmail() {
                         {r.confidence.toFixed(0)}%
                         <div style={{ fontSize: "0.65rem" }}>{r.confidence_label}</div>
                       </td>
+                      <td style={{ padding: "0.4rem 0.5rem", whiteSpace: "nowrap" }}>
+                        <span style={{ color: r.expected_net_edge_pct > r.uncertainty_pct ? "#16a34a" : "#64748b" }}>
+                          {r.expected_net_edge_pct.toFixed(2)}%
+                        </span>
+                        <div style={{ fontSize: "0.65rem", color: "var(--text-3)" }}>±{r.uncertainty_pct.toFixed(2)}% · koszt {r.transaction_cost_pct.toFixed(2)}%</div>
+                      </td>
+                      <td style={{ padding: "0.4rem 0.5rem", fontSize: "0.7rem", whiteSpace: "nowrap" }}>
+                        {r.market_segment}/{r.regime}
+                        <div style={{ color: "var(--text-3)" }}>{r.calibration_scope} · n={r.calibration_sample_size}</div>
+                      </td>
                       <td style={{ padding: "0.4rem 0.5rem" }}>{scoreBar(r.trend_score + 50, 50)}</td>
                       <td style={{ padding: "0.4rem 0.5rem" }}>{scoreBar(r.sentiment_score + 50, 50)}</td>
                       <td style={{ padding: "0.4rem 0.5rem" }}>
@@ -1932,6 +2053,13 @@ async function notifyFirstEmail() {
                             {r.ml_prediction === "up" ? "▲" : "▼"} {pct(r.ml_prob_up)}
                           </span>
                         ) : <span style={{ color: "var(--text-3)" }}>—</span>}
+                      </td>
+                      <td style={{ padding: "0.4rem 0.5rem", color: r.meta_gate_applied ? "#dc2626" : "inherit" }}>
+                        {r.meta_trade_probability != null ? (
+                          <span title={r.meta_trade_threshold != null ? `próg ${r.meta_trade_threshold.toFixed(1)}% · ${r.meta_threshold_scope ?? "fallback"}` : undefined}>
+                            {r.meta_trade_probability.toFixed(1)}%/{r.meta_trade_threshold?.toFixed(1) ?? "—"}%{r.meta_gate_applied ? " ⛔" : ""}
+                          </span>
+                        ) : "—"}
                       </td>
                       <td style={{ padding: "0.4rem 0.5rem", fontSize: "0.75rem", whiteSpace: "nowrap" }}>
                         {r.implied_volatility != null ? (
@@ -3115,9 +3243,9 @@ async function notifyFirstEmail() {
                             : idx === 2 ? { bg: "rgba(180,120,60,0.1)", border: "#b45309", icon: "🥉" }
                             : { bg: "var(--surface)", border: "var(--border)", icon: "⭐" };
 
-                const certaintyPct = (pick.certainty_score * 100).toFixed(1);
-                const certaintyColor = pick.certainty_score >= 0.8 ? "#16a34a"
-                                     : pick.certainty_score >= 0.7 ? "#2563eb"
+                const certaintyPct = pick.certainty_score.toFixed(1);
+                const certaintyColor = pick.certainty_score >= 80 ? "#16a34a"
+                                     : pick.certainty_score >= 70 ? "#2563eb"
                                      : "#f59e0b";
 
                 const recColor = pick.recommendation === "KUP" ? "#16a34a"
@@ -3161,7 +3289,7 @@ async function notifyFirstEmail() {
                         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem" }}>
                           <span style={{ fontSize: "0.78rem", color: "var(--text-3)", whiteSpace: "nowrap" }}>Pewność:</span>
                           <div style={{ flex: 1, height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
-                            <div style={{ height: "100%", width: `${pick.certainty_score * 100}%`, background: certaintyColor, borderRadius: 4, transition: "width 0.4s" }} />
+                            <div style={{ height: "100%", width: `${pick.certainty_score}%`, background: certaintyColor, borderRadius: 4, transition: "width 0.4s" }} />
                           </div>
                           <span style={{ fontWeight: 700, color: certaintyColor, fontSize: "0.92rem", whiteSpace: "nowrap" }}>
                             {certaintyPct}%
@@ -3277,8 +3405,19 @@ async function notifyFirstEmail() {
 
       {/* ── Zakładka Intraday ─────────────────────────────────────────────── */}
       {activeTab === "intraday" && (
-        <IntradayTab assets={assets} />
+        <IntradayTab assets={assets} selectedAssetId={selectedAsset} />
       )}
+
+      {/* ── Zakładka Symulator ───────────────────────────────────────────── */}
+      {activeTab === "simulator" && (
+        <SimulatorTab assets={assets} selectedAssetId={selectedAsset} />
+      )}
+
+      {activeTab === "paper" && (
+        <PaperTradingTab assets={assets} selectedAssetId={selectedAsset} />
+      )}
+
+      {activeTab === "calibration" && <CalibrationAuditTab />}
 
       {/* ── Zakładka Alerty SMS ───────────────────────────────────────────── */}
       {activeTab === "alerts-config" && (

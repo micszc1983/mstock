@@ -73,6 +73,8 @@ class CycleReport:
     ml_trained_targets: list[str] = field(default_factory=list)
     reports_generated: int = 0
     notifications_sent: int = 0
+    recommendations_journaled: int = 0
+    recommendation_outcomes_evaluated: int = 0
     errors: list[str] = field(default_factory=list)
 
     def err(self, step: str, exc: Exception) -> None:
@@ -101,6 +103,8 @@ class CycleReport:
             f"ml_trained={self.ml_trained_targets} "
             f"reports={self.reports_generated} "
             f"notifications={self.notifications_sent} "
+            f"recommendations_journaled={self.recommendations_journaled} "
+            f"recommendation_outcomes={self.recommendation_outcomes_evaluated} "
             f"errors={len(self.errors)}"
         )
 
@@ -200,6 +204,8 @@ def _step_alerts(db, asset: AssetORM, r: CycleReport) -> None:
 def _step_ml_dataset(db, r: CycleReport) -> None:
     try:
         result = build_training_dataset(db)
+        from app.services.recommendation_calibration import invalidate_calibration_cache
+        invalidate_calibration_cache()
         r.ml_dataset_rows = result.total_rows
         r.log(f"ML dataset: {result.built_rows} nowych wierszy, łącznie {result.total_rows}")
     except Exception as exc:
@@ -210,6 +216,28 @@ def _step_ml_train(db, r: CycleReport) -> None:
     if not _ml_retrain_auto():
         return
     try:
+        from datetime import timedelta
+        from sqlalchemy import func
+        from app.db.models import MLModelRunORM, MLTrainingRowORM
+        latest_run = db.scalar(
+            select(MLModelRunORM).order_by(MLModelRunORM.trained_at.desc()).limit(1)
+        )
+        if latest_run is not None:
+            trained_at = latest_run.trained_at
+            if trained_at.tzinfo is None:
+                trained_at = trained_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - trained_at
+            new_rows = db.scalar(
+                select(func.count()).select_from(MLTrainingRowORM)
+                .where(MLTrainingRowORM.snapshot_at > latest_run.trained_at)
+            ) or 0
+            min_age = timedelta(hours=max(1, settings.ml_retrain_interval_hours))
+            if age < min_age or new_rows < max(1, settings.ml_retrain_min_new_rows):
+                r.log(
+                    f"ML retrain pominięty: wiek={age.total_seconds()/3600:.1f}h, "
+                    f"nowe_wiersze={new_rows}"
+                )
+                return
         results = train_all_targets(db)
         trained = [res["target"] for res in results if not res.get("skipped")]
         skipped = [res["target"] for res in results if res.get("skipped")]
@@ -220,6 +248,64 @@ def _step_ml_train(db, r: CycleReport) -> None:
             r.log(f"ML skipped (za mało danych): {skipped}")
     except Exception as exc:
         r.err("ml_train", exc)
+
+
+def _step_recommendation_journal(db, r: CycleReport) -> None:
+    """Najpierw domyka stare wyniki, następnie zapisuje bieżący snapshot."""
+    try:
+        from app.services.recommendation_engine import invalidate_recommendations_cache
+        from app.services.recommendation_journal import (
+            evaluate_recommendation_outcomes,
+            persist_current_recommendations,
+        )
+        invalidate_recommendations_cache()
+        evaluated = evaluate_recommendation_outcomes(db)
+        inserted = persist_current_recommendations(db)
+        r.recommendation_outcomes_evaluated += evaluated
+        r.recommendations_journaled += inserted
+        r.log(f"Recommendation journal: {inserted} nowych, {evaluated} wyników uzupełnionych")
+    except Exception as exc:
+        r.err("recommendation_journal", exc)
+
+
+def _step_ml_monitoring(db, r: CycleReport) -> None:
+    if not settings.ml_monitoring_enabled:
+        return
+    try:
+        from app.services.ml_monitoring import monitor_active_models
+        rows = monitor_active_models(db, allow_rollback=True)
+        degraded = [row.model_run_id for row in rows if row.is_degraded]
+        rollbacks = [row.model_run_id for row in rows if row.action == "rollback"]
+        r.log(f"ML monitoring: {len(rows)} modeli, degraded={degraded}, rollback={rollbacks}")
+    except Exception as exc:
+        r.err("ml_monitoring", exc)
+
+
+def _step_ml_retention(db, r: CycleReport) -> None:
+    try:
+        from app.services.ml_retention import prune_model_runs
+        report = prune_model_runs(
+            db,
+            keep_per_group=settings.ml_model_run_retention_count,
+            dry_run=False,
+        )
+        r.log(
+            f"ML retention: usunięto={report.deleted}, pozostawiono="
+            f"{report.total_before - report.deleted}, limit={report.keep_per_group}"
+        )
+    except Exception as exc:
+        db.rollback()
+        r.err("ml_retention", exc)
+
+
+def _step_anomaly(db, r: CycleReport) -> None:
+    try:
+        from app.services.anomaly_service import score_all_assets
+        results = score_all_assets(db)
+        anomalous = [aid for aid, s in results.items() if s is not None and s >= 70]
+        r.log(f"Anomaly detection: {len(results)} aktywów, anomalie={anomalous or 'brak'}")
+    except Exception as exc:
+        r.err("anomaly_detection", exc)
 
 
 def _step_reports(db, assets: list[AssetORM], r: CycleReport) -> None:
@@ -513,6 +599,12 @@ def run_periodic_sync() -> None:
             print("[scheduler] → ML pipeline")
             _step_ml_dataset(db, r)
             _step_ml_train(db, r)
+            _step_ml_monitoring(db, r)
+            # Rekomendacje powstają po monitoringu, więc używają aktualnej
+            # automatycznej bramki eligible/shadow/degraded.
+            _step_recommendation_journal(db, r)
+            _step_ml_retention(db, r)
+            _step_anomaly(db, r)
 
             # Zapisz sygnały ensemble dla wszystkich aktywów (buduje historię dla leaderboard)
             ensemble_saved = 0
@@ -813,18 +905,18 @@ def _step_news_alerts() -> None:
 
 
 def _is_market_hours() -> bool:
-    """Zwraca True jeśli aktualny czas mieści się w godzinach sesji NYSE (15:30–22:15 Warsaw)."""
-    from zoneinfo import ZoneInfo
-    now_pl = datetime.now(ZoneInfo("Europe/Warsaw"))
-    # Tylko dni robocze
-    if now_pl.weekday() >= 5:
-        return False
-    minutes = now_pl.hour * 60 + now_pl.minute
-    return 15 * 60 + 25 <= minutes <= 22 * 60 + 15  # 15:25–22:15 Warsaw
+    """Zwraca True jeśli aktualny czas mieści się w godzinach sesji WSE lub NYSE.
+    WSE:  9:00–17:35 Warsaw
+    NYSE: 15:25–22:15 Warsaw
+    Łącznie: 9:00–22:15 Warsaw w dni robocze."""
+    from app.services.market_calendar import any_supported_market_open
+    return any_supported_market_open()
 
 
-_fast_check_lock = threading.Lock()
-_intraday_lock = threading.Lock()
+# Wszystkie joby zapisujące do SQLite współdzielą jedną blokadę. Dzięki temu
+# fast-check i intraday nie zapisują równolegle z pełnym pipeline'em.
+_fast_check_lock = scheduler_lock
+_intraday_lock = scheduler_lock
 
 # ── Pre-market gap alert ──────────────────────────────────────────────────────
 
@@ -833,13 +925,14 @@ _premarket_alerted_today: dict[str, str] = {}
 
 
 def _is_premarket_hours() -> bool:
-    """Zwraca True w dni robocze 10:00–15:25 Warsaw (= NYSE pre-market 4:00–9:30 ET)."""
+    """Zwraca True podczas premarket NYSE, z uwzględnieniem DST i świąt."""
     from zoneinfo import ZoneInfo
-    now_pl = datetime.now(ZoneInfo("Europe/Warsaw"))
-    if now_pl.weekday() >= 5:
+    from app.services.market_calendar import nyse_holidays
+    now_ny = datetime.now(ZoneInfo("America/New_York"))
+    if now_ny.weekday() >= 5 or now_ny.date() in nyse_holidays(now_ny.year):
         return False
-    minutes = now_pl.hour * 60 + now_pl.minute
-    return 10 * 60 <= minutes <= 15 * 60 + 25
+    minutes = now_ny.hour * 60 + now_ny.minute
+    return 4 * 60 <= minutes < 9 * 60 + 30
 
 
 def _fetch_premarket_quote(symbol: str) -> dict | None:
@@ -1033,6 +1126,10 @@ def _fast_price_and_alert_check() -> None:
             assets = db.scalars(select(AssetORM).order_by(AssetORM.name.asc())).all()
 
             for asset in assets:
+                if asset.type == "stock":
+                    from app.services.market_calendar import is_market_open
+                    if not is_market_open(asset.price_symbol or asset.symbol or ""):
+                        continue
                 _step_sync_prices(db, asset, r)
                 _step_alerts(db, asset, r)
 
@@ -1068,9 +1165,9 @@ def start_scheduler() -> None:
         _send_daily_portfolio_report,
         "cron",
         day_of_week="mon-fri",  # tylko dni robocze
-        hour=22,
-        minute=10,              # 10 min po zamknięciu NYSE/NASDAQ (16:00 ET = 22:00 PL)
-        timezone="Europe/Warsaw",
+        hour=16,
+        minute=10,
+        timezone="America/New_York",
         id="portfolio-report",
         replace_existing=True,
     )
@@ -1081,15 +1178,14 @@ def start_scheduler() -> None:
         id="fast-price-check",
         replace_existing=True,
     )
-    if settings.finnhub_api_key:
-        scheduler.add_job(
-            _sync_intraday_job,
-            "interval",
-            minutes=15,
-            id="intraday-sync",
-            replace_existing=True,
-        )
-        print("[scheduler] Intraday sync co 15 min (tylko podczas sesji NYSE)")
+    scheduler.add_job(
+        _sync_intraday_job,
+        "interval",
+        minutes=15,
+        id="intraday-sync",
+        replace_existing=True,
+    )
+    print("[scheduler] Intraday sync co 15 min (podczas sesji WSE/NYSE)")
     if settings.sms_enabled and settings.finnhub_api_key:
         scheduler.add_job(
             _premarket_gap_check,

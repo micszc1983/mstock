@@ -11,6 +11,8 @@ from app.services.quality_metrics import (
     build_thesis_quality_by_horizon,
     build_thesis_quality_summary,
 )
+from app.repositories.prices import list_prices
+from app.services.ohlcv_validation import validate_series
 
 router = APIRouter(tags=["quality"])
 
@@ -37,3 +39,9 @@ def thesis_quality_by_horizon(asset_id: str, limit: int = Query(default=500, ge=
 def forecast_quality_summary(asset_id: str, limit: int = Query(default=500, ge=1, le=5000), db: Session = Depends(get_db)) -> list[ForecastQualitySummary]:
     _ensure_asset_exists(db, asset_id)
     return build_forecast_quality_summary(db, asset_id, limit=limit)
+
+
+@router.get("/assets/{asset_id}/quality/ohlcv")
+def ohlcv_quality(asset_id: str, limit: int = Query(default=500, ge=20, le=5000), db: Session = Depends(get_db)) -> dict:
+    _ensure_asset_exists(db, asset_id)
+    return {"asset_id": asset_id, **validate_series(list_prices(db, asset_id, limit=limit))}

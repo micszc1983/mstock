@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class SignalContribution(BaseModel):
@@ -19,10 +19,25 @@ class AssetRecommendation(BaseModel):
     asset_type: str
 
     # Wynik główny
-    recommendation: str         # "KUP" | "SPRZEDAJ" | "TRZYMAJ"
-    composite_score: float      # 0-100; >60=kup, <40=sprzedaj
-    confidence: float           # 0-100; jak daleko od 50
+    recommendation: str         # "KUP" | "SPRZEDAJ" | "TRZYMAJ" | "BRAK TRANSAKCJI"
+    composite_score: float      # 0-100; diagnostyczny surowy wynik sygnałów
+    confidence: float           # 0-100; historycznie skalibrowane P(decyzja trafna)
     confidence_label: str       # "wysoka" | "średnia" | "niska"
+
+    # Kalibracja segmentu i kosztów
+    market_segment: str = "UNKNOWN"
+    calibration_scope: str = "insufficient_data"
+    calibration_sample_size: int = 0
+    probability_buy: float = 0.0
+    probability_sell: float = 0.0
+    probability_no_trade: float = 100.0
+    buy_threshold: float = 101.0
+    sell_threshold: float = 101.0
+    transaction_cost_pct: float = 0.0
+    expected_gross_edge_pct: float = 0.0
+    expected_net_edge_pct: float = 0.0
+    uncertainty_pct: float = 0.0
+    no_trade_reason: Optional[str] = None
 
     # Kluczowe sygnały
     trend_score: float
@@ -47,6 +62,11 @@ class AssetRecommendation(BaseModel):
     ml_20d_prediction: Optional[str] = None   # "up" | "down" | None  (20d)
     ml_20d_prob_up: Optional[float] = None
     ml_thesis_prediction: Optional[str]   # target_thesis_success model
+    ml_meta_prediction: Optional[str] = None
+    meta_trade_probability: Optional[float] = None
+    meta_gate_applied: bool = False
+    meta_trade_threshold: Optional[float] = None
+    meta_threshold_scope: Optional[str] = None
 
     directional_accuracy: Optional[float]   # historyczna jakość tez
 
@@ -77,3 +97,44 @@ class TopPick(AssetRecommendation):
     max_signals: int = 9
     aligned_labels: list[str]     # nazwy spełnionych sygnałów
     missing_labels: list[str]     # nazwy niespełnionych sygnałów
+
+
+class RecommendationJournalRecord(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    asset_id: str
+    snapshot_at: datetime
+    created_at: datetime
+    model_version: str
+    market: str
+    regime: str
+    action: str
+    displayed_action: str
+    has_position: bool
+    calibration_scope: str
+    calibration_sample_size: int
+    composite_score: float
+    confidence: float
+    probability_buy: float
+    probability_sell: float
+    probability_no_trade: float
+    buy_threshold: float
+    sell_threshold: float
+    transaction_cost_pct: float
+    expected_gross_edge_pct: float
+    expected_net_edge_pct: float
+    uncertainty_pct: float
+    meta_trade_probability: Optional[float]
+    meta_gate_applied: bool
+    meta_trade_threshold: Optional[float] = None
+    meta_threshold_scope: Optional[str] = None
+    base_price: Optional[float]
+    quality_flag: Optional[str]
+    realized_return_1d_pct: Optional[float]
+    realized_return_5d_pct: Optional[float]
+    realized_return_20d_pct: Optional[float]
+    strategy_net_return_1d_pct: Optional[float]
+    strategy_net_return_5d_pct: Optional[float]
+    strategy_net_return_20d_pct: Optional[float]
+    evaluated_at: Optional[datetime]

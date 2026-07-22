@@ -518,6 +518,48 @@
     "metal_price_fn": null
   },
   {
+    "id": "etfaifs",
+    "symbol": "ETFAIFS",
+    "name": "Amundi S&P 500 UCITS ETF",
+    "type": "stock",
+    "currency": "PLN",
+    "sector": "ETF / S&P 500",
+    "description": null,
+    "seed_price": 650,
+    "price_symbol": "ETFAIFS.WA",
+    "news_symbol": null,
+    "news_term": "Amundi S&P 500 ETF GPW",
+    "metal_price_fn": null
+  },
+  {
+    "id": "etfeunm",
+    "symbol": "ETFEUNM",
+    "name": "Amundi MSCI Europe UCITS ETF",
+    "type": "stock",
+    "currency": "PLN",
+    "sector": "ETF / Europe",
+    "description": null,
+    "seed_price": 180,
+    "price_symbol": "ETFEUNM.WA",
+    "news_symbol": null,
+    "news_term": "Amundi MSCI Europe ETF GPW",
+    "metal_price_fn": null
+  },
+  {
+    "id": "etfwida",
+    "symbol": "ETFWIDA",
+    "name": "Amundi MSCI World UCITS ETF",
+    "type": "stock",
+    "currency": "PLN",
+    "sector": "ETF / World",
+    "description": null,
+    "seed_price": 470,
+    "price_symbol": "ETFWIDA.WA",
+    "news_symbol": null,
+    "news_term": "Amundi MSCI World ETF GPW",
+    "metal_price_fn": null
+  },
+  {
     "id": "gold",
     "symbol": "XAU",
     "name": "Gold",

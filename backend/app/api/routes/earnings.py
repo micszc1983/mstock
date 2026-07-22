@@ -83,6 +83,15 @@ def analyze_earnings_record(asset_id: str, earnings_id: int, db: Session = Depen
     return EarningsCallAnalysis.model_validate(result)
 
 
+@router.get("/assets/{asset_id}/pead")
+def get_asset_pead(asset_id: str, db: Session = Depends(get_db)) -> dict:
+    """Post-Earnings Announcement Drift — analiza dryfu po wynikach."""
+    if get_asset(db, asset_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
+    from app.services.pead_service import analyze_pead
+    return analyze_pead(db, asset_id)
+
+
 @router.post("/sync/earnings")
 def sync_earnings(db: Session = Depends(get_db)) -> dict:
     """Wymuś synchronizację danych wynikowych dla wszystkich aktywów (działa w tle)."""

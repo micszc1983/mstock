@@ -336,6 +336,32 @@ tbody tr:hover { background: var(--bg-hover); }
 }
 .sticky-select:focus { border-color: var(--accent); }
 
+.asset-picker { position: relative; }
+.asset-picker-trigger {
+  height: 34px; min-width: 150px; display: flex; align-items: center; gap: 6px;
+  padding: 0 9px; border: 1px solid var(--border-2); border-radius: 7px;
+  color: var(--text); background: var(--bg-subtle); cursor: pointer;
+}
+.asset-picker-trigger strong { flex: 1; text-align: left; font-size: 13px; }
+.asset-picker-forecast { color: var(--text-2); font-weight: 700; }
+.asset-picker-panel {
+  position: fixed; z-index: 1000; top: 50px; left: 65px; width: min(520px, calc(100vw - 16px));
+  border: 1px solid var(--border-2); border-radius: 10px; background: var(--bg-card);
+  box-shadow: 0 16px 42px rgba(0,0,0,.24); overflow: hidden;
+}
+.asset-picker-search { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+.asset-picker-search input { width: 100%; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 14px; }
+.asset-picker-legend { padding: 6px 10px; font-size: 10px; line-height: 1.45; color: var(--text-3); background: var(--bg-subtle); }
+.asset-picker-list { max-height: min(68vh, 560px); overflow-y: auto; overscroll-behavior: contain; }
+.asset-picker-group { position: sticky; top: 0; padding: 6px 10px; color: var(--text-3); background: var(--bg-subtle); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.asset-picker-row { width: 100%; display: grid; grid-template-columns: 25px 28px 68px 1fr auto; align-items: center; gap: 5px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--border); color: var(--text); background: var(--bg-card); cursor: pointer; text-align: left; }
+.asset-picker-row:hover, .asset-picker-row.selected { background: var(--bg-hover); }
+.asset-picker-direction { font-weight: 700; color: var(--text-2); }
+.asset-picker-symbol { font-size: 12px; font-weight: 800; }
+.asset-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-2); }
+.asset-picker-meta { font-size: 10px; color: var(--text-3); }
+.asset-picker-empty { padding: 24px; text-align: center; color: var(--text-3); }
+
 .sticky-input {
   height: 32px;
   padding: 0 8px;
@@ -453,6 +479,10 @@ tbody tr:hover { background: var(--bg-hover); }
 @media (max-width: 640px) {
   .sticky-url { display: none; }
   .sticky-age { display: none; }
+  .asset-picker-panel { left: 8px; right: 8px; width: auto; top: 52px; }
+  .asset-picker-trigger { min-width: 116px; }
+  .asset-picker-row { grid-template-columns: 25px 28px 58px 1fr; }
+  .asset-picker-meta { display: none; }
 }
 
 /* ── Provider status dots in sticky bar ──────────────────────── */

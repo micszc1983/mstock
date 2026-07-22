@@ -40,13 +40,16 @@ def get_latest_forecasts(db: Session, asset_id: str) -> list[ForecastORM]:
     return db.scalars(stmt).all()
 
 
-def list_forecast_history(db: Session, asset_id: str, limit: int = 100) -> list[ForecastORM]:
-    stmt = (
-        select(ForecastORM)
-        .where(ForecastORM.asset_id == asset_id)
-        .order_by(ForecastORM.generated_at.desc(), ForecastORM.horizon.asc())
-        .limit(limit)
-    )
+def list_forecast_history(
+    db: Session,
+    asset_id: str,
+    horizon: str | None = None,
+    limit: int = 100,
+) -> list[ForecastORM]:
+    stmt = select(ForecastORM).where(ForecastORM.asset_id == asset_id)
+    if horizon:
+        stmt = stmt.where(ForecastORM.horizon == horizon)
+    stmt = stmt.order_by(ForecastORM.generated_at.desc(), ForecastORM.horizon.asc()).limit(limit)
     return db.scalars(stmt).all()
 
 

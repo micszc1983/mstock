@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.alerts import router as alerts_router
@@ -28,8 +30,11 @@ from app.api.routes.earnings import router as earnings_router
 from app.api.routes.insider import router as insider_router
 from app.api.routes.intraday import router as intraday_router
 from app.api.routes.sms_config import router as sms_config_router
+from app.api.routes.anomaly import router as anomaly_router
+from app.api.routes.simulator import router as simulator_router
+from app.api.routes.paper_trading import router as paper_trading_router
 from app.core.config import settings
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, get_db
 from app.repositories.assets import list_assets
 from app.seed import seed_database
 from app.services.feature_builder import rebuild_all_features_and_forecasts
@@ -40,181 +45,24 @@ from app.services.scheduler import start_scheduler, stop_scheduler
 async def lifespan(app: FastAPI):
     # ---- startup ----
     print("[startup] ThesisLab uruchamia się...")
+    if settings.testing:
+        yield
+        return
 
-    # Utwórz tabele jeśli nie istnieją (fallback gdy alembic nie był uruchomiony)
-    from app.db.session import Base, engine
-    from app.db import models as _models  # noqa: F401 — importuj modele żeby Base je znał
-    from sqlalchemy import text
-    Base.metadata.create_all(bind=engine)
-
-    # Inline migrations: dodaj brakujące kolumny jeśli nie istnieją
-    with engine.begin() as conn:
-        try:
-            conn.execute(text("ALTER TABLE assets ADD COLUMN currency VARCHAR(8) NOT NULL DEFAULT 'USD'"))
-            conn.execute(text("UPDATE assets SET currency = 'PLN' WHERE price_symbol LIKE '%.WA'"))
-            print("[startup] migracja: dodano kolumnę currency do assets")
-        except Exception:
-            pass  # Kolumna już istnieje — ignoruj
-        try:
-            conn.execute(text("ALTER TABLE ml_model_runs ADD COLUMN asset_id VARCHAR(64)"))
-            print("[startup] migracja: dodano kolumnę asset_id do ml_model_runs")
-        except Exception:
-            pass  # Kolumna już istnieje — ignoruj
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS portfolio_positions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id VARCHAR(64) NOT NULL UNIQUE,
-                    quantity FLOAT NOT NULL DEFAULT 0.0,
-                    avg_buy_price FLOAT,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (asset_id) REFERENCES assets(id)
-                )
-            """))
-            print("[startup] migracja: tabela portfolio_positions gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN implied_volatility FLOAT"))
-            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN put_call_ratio FLOAT"))
-            conn.execute(text("ALTER TABLE daily_asset_features ADD COLUMN iv_rank FLOAT"))
-            print("[startup] migracja: dodano kolumny opcyjne (IV, P/C, IV rank) do daily_asset_features")
-        except Exception:
-            pass  # Kolumny już istnieją — ignoruj
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS earnings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
-                    report_date DATE NOT NULL,
-                    fiscal_period VARCHAR(16),
-                    eps_estimate FLOAT,
-                    eps_actual FLOAT,
-                    revenue_estimate FLOAT,
-                    revenue_actual FLOAT,
-                    eps_surprise_pct FLOAT,
-                    surprise_label VARCHAR(8),
-                    is_upcoming BOOLEAN NOT NULL DEFAULT 0,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_asset_id ON earnings(asset_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_report_date ON earnings(report_date)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_earnings_is_upcoming ON earnings(is_upcoming)"))
-            print("[startup] migracja: tabela earnings gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS earnings_call_analyses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    earnings_id INTEGER NOT NULL UNIQUE REFERENCES earnings(id),
-                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
-                    analyzed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    tone_score INTEGER NOT NULL DEFAULT 3,
-                    guidance_change VARCHAR(16) NOT NULL DEFAULT 'none',
-                    key_themes_json TEXT NOT NULL DEFAULT '[]',
-                    risk_factors_json TEXT NOT NULL DEFAULT '[]',
-                    key_quote TEXT,
-                    llm_sentiment_score FLOAT NOT NULL DEFAULT 0.0,
-                    summary TEXT NOT NULL DEFAULT '',
-                    model_used VARCHAR(64) NOT NULL DEFAULT '',
-                    news_articles_used INTEGER NOT NULL DEFAULT 0,
-                    raw_response TEXT NOT NULL DEFAULT ''
-                )
-            """))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_asset_id ON earnings_call_analyses(asset_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_eca_earnings_id ON earnings_call_analyses(earnings_id)"))
-            print("[startup] migracja: tabela earnings_call_analyses gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS insider_trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
-                    transaction_date DATE NOT NULL,
-                    filing_date DATE,
-                    name VARCHAR(200) NOT NULL,
-                    transaction_code VARCHAR(4) NOT NULL,
-                    transaction_type VARCHAR(20) NOT NULL,
-                    shares FLOAT,
-                    price FLOAT,
-                    value FLOAT,
-                    source VARCHAR(20) NOT NULL DEFAULT 'finnhub',
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_insider_trades_asset_id ON insider_trades(asset_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_insider_trades_tx_date ON insider_trades(transaction_date)"))
-            print("[startup] migracja: tabela insider_trades gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS short_interest (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
-                    report_date DATE NOT NULL,
-                    shares_short FLOAT,
-                    short_percent_float FLOAT,
-                    short_ratio FLOAT,
-                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_short_interest_asset_id ON short_interest(asset_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_short_interest_report_date ON short_interest(report_date)"))
-            print("[startup] migracja: tabela short_interest gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS intraday_candles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id VARCHAR(64) NOT NULL REFERENCES assets(id),
-                    resolution VARCHAR(8) NOT NULL,
-                    timestamp DATETIME NOT NULL,
-                    open FLOAT NOT NULL,
-                    high FLOAT NOT NULL,
-                    low FLOAT NOT NULL,
-                    close FLOAT NOT NULL,
-                    volume FLOAT NOT NULL,
-                    rsi FLOAT,
-                    ema9 FLOAT,
-                    ema20 FLOAT,
-                    macd FLOAT,
-                    macd_signal FLOAT,
-                    bb_upper FLOAT,
-                    bb_lower FLOAT,
-                    volume_ratio FLOAT,
-                    CONSTRAINT uq_intraday_candle UNIQUE (asset_id, resolution, timestamp)
-                )
-            """))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_asset_id ON intraday_candles(asset_id)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_resolution ON intraday_candles(resolution)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_intraday_candles_timestamp ON intraday_candles(timestamp)"))
-            print("[startup] migracja: tabela intraday_candles gotowa")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN vwap FLOAT"))
-            print("[startup] migracja: kolumna vwap dodana do intraday_candles")
-        except Exception:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN adx FLOAT"))
-            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN di_plus FLOAT"))
-            conn.execute(text("ALTER TABLE intraday_candles ADD COLUMN di_minus FLOAT"))
-            print("[startup] migracja: kolumny adx/di_plus/di_minus dodane do intraday_candles")
-        except Exception:
-            pass
+    # Schemat jest zarządzany wyłącznie przez wersjonowane migracje Alembic.
+    # Nie uruchamiaj aplikacji na częściowo zaktualizowanej bazie.
+    from alembic import command
+    from alembic.config import Config
+    from pathlib import Path
+    alembic_cfg = Config(str(Path(__file__).with_name("alembic.ini")))
+    alembic_cfg.set_main_option("script_location", str(Path(__file__).with_name("alembic")))
+    command.upgrade(alembic_cfg, "head")
 
     print("[startup] tabele DB gotowe")
 
     db = SessionLocal()
     try:
-        # Usuń dane seed (losowe ceny) jeśli nigdy nie było udanego syncu od providera
+        # Opcjonalny, jawnie włączany tryb serwisowy do usuwania danych demo.
         try:
             from app.db.models import (
                 PricePointORM, DailyAssetFeatureORM, ForecastORM, ThesisORM,
@@ -225,9 +73,9 @@ async def lifespan(app: FastAPI):
             price_count = db.scalar(select(func.count()).select_from(PricePointORM)) or 0
             ok_price_syncs = db.scalar(
                 select(func.count()).select_from(SyncLogORM)
-                .where(SyncLogORM.sync_type == "prices", SyncLogORM.status == "ok")
+                .where(SyncLogORM.sync_type == "prices", SyncLogORM.status.in_(("ok", "success")))
             ) or 0
-            if price_count > 0 and ok_price_syncs == 0:
+            if settings.allow_seed_cleanup and price_count > 0 and ok_price_syncs == 0:
                 print(f"[startup] wykryto {price_count} rekordów cen bez żadnego udanego syncu — usuwam dane seed")
                 for model in [
                     MLPredictionORM, MLTrainingRowORM, EnsembleRecordORM,
@@ -247,18 +95,23 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[startup] seed BŁĄD: {exc}")
 
-        try:
-            assets = list_assets(db)
-            built = rebuild_all_features_and_forecasts(db, assets)
-            print(f"[startup] rebuild OK — zbudowano snapshoty dla {built}/{len(assets)} aktywów")
-        except Exception as exc:
-            import traceback
-            print(f"[startup] rebuild BŁĄD: {exc}")
-            traceback.print_exc()
+        if settings.startup_rebuild_enabled:
+            try:
+                assets = list_assets(db)
+                built = rebuild_all_features_and_forecasts(db, assets)
+                print(f"[startup] rebuild OK — zbudowano snapshoty dla {built}/{len(assets)} aktywów")
+            except Exception as exc:
+                import traceback
+                print(f"[startup] rebuild BŁĄD: {exc}")
+                traceback.print_exc()
+        else:
+            print("[startup] ciężki rebuild pominięty; wykona go scheduler")
 
 
-        # Usuń duplikaty cen (ten sam asset + ta sama data, różne timestamps)
+        # Destrukcyjne porządki tylko po jawnym włączeniu trybu serwisowego.
         try:
+            if not settings.allow_seed_cleanup:
+                raise RuntimeError("cleanup disabled")
             from sqlalchemy import text
             with db:
                 result = db.execute(text("""
@@ -273,17 +126,20 @@ async def lifespan(app: FastAPI):
                 if removed:
                     db.commit()
                     print(f"[startup] Usunięto {removed} zduplikowanych punktów cenowych")
+        except RuntimeError:
+            pass
         except Exception as exc:
             print(f"[startup] cleanup duplikatów: {exc}")
-        try:
-            from app.services.feature_builder import backfill_all_assets
-            backfilled = backfill_all_assets(db, days_back=500)
-            if backfilled:
-                print(f"[startup] backfill OK — dodano {backfilled} historycznych snapshotów")
-            else:
-                print("[startup] backfill — brak nowych snapshotów do dodania")
-        except Exception as exc:
-            print(f"[startup] backfill skipped: {exc}")
+        if settings.startup_rebuild_enabled:
+            try:
+                from app.services.feature_builder import backfill_all_assets
+                backfilled = backfill_all_assets(db, days_back=500)
+                if backfilled:
+                    print(f"[startup] backfill OK — dodano {backfilled} historycznych snapshotów")
+                else:
+                    print("[startup] backfill — brak nowych snapshotów do dodania")
+            except Exception as exc:
+                print(f"[startup] backfill skipped: {exc}")
     finally:
         db.close()
 
@@ -311,6 +167,27 @@ app = FastAPI(
     description="Modular ThesisLab backend.",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def protect_administrative_operations(request: Request, call_next):
+    """Chroni operacje administracyjne; lokalny proces pozostaje używalny bez klucza."""
+    protected = (request.url.path.startswith("/admin") or request.url.path.startswith("/ml/")
+                 or request.url.path.startswith("/paper/"))
+    if protected and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        import secrets
+        client_host = request.client.host if request.client else ""
+        supplied = request.headers.get("X-Admin-Key", "")
+        configured = settings.admin_api_key
+        local_client = client_host in {"127.0.0.1", "::1", "localhost"}
+        if not configured and not local_client:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "ADMIN_API_KEY is required for remote administrative operations"},
+            )
+        if configured and not secrets.compare_digest(supplied, configured):
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing admin key"})
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,
@@ -342,6 +219,9 @@ app.include_router(earnings_router)
 app.include_router(insider_router)
 app.include_router(intraday_router)
 app.include_router(sms_config_router)
+app.include_router(anomaly_router)
+app.include_router(simulator_router)
+app.include_router(paper_trading_router)
 
 
 # ---------------------------------------------------------------------------
@@ -350,28 +230,20 @@ app.include_router(sms_config_router)
 from sqlalchemy import text as _sql_text
 
 @app.get("/health")
-def health_check(db=None):
-    from app.db.session import SessionLocal as _SL
+def health_check(db=Depends(get_db)):
     from app.repositories.assets import list_assets as _la
-    db = _SL()
-    try:
-        assets = _la(db)
-        counts = {}
-        for table in ("price_points", "daily_asset_features", "forecasts", "theses", "ml_training_rows"):
-            try:
-                n = db.execute(_sql_text(f"SELECT COUNT(*) FROM {table}")).scalar()
-                counts[table] = n
-            except Exception:
-                counts[table] = "error"
-        return {
-            "status": "ok",
-            "assets": [a.id for a in assets],
-            "asset_count": len(assets),
-            "table_counts": counts,
-            "data_ready": counts.get("daily_asset_features", 0) > 0,
-        }
-    finally:
-        db.close()
+    assets = _la(db)
+    counts = {}
+    for table in ("price_points", "daily_asset_features", "forecasts", "theses", "ml_training_rows"):
+        try:
+            n = db.execute(_sql_text(f"SELECT COUNT(*) FROM {table}")).scalar()
+            counts[table] = n
+        except Exception:
+            counts[table] = "error"
+    return {
+        "status": "ok", "assets": [a.id for a in assets], "asset_count": len(assets),
+        "table_counts": counts, "data_ready": counts.get("daily_asset_features", 0) > 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +425,10 @@ def admin_provider_status(db=None):
             # Ostatni log z tego providera
             last_ok = db.scalar(
                 select(SyncLogORM.created_at)
-                .where(SyncLogORM.provider.startswith(provider_prefix), SyncLogORM.status == "ok")
+                .where(
+                    SyncLogORM.provider.startswith(provider_prefix),
+                    SyncLogORM.status.in_(("ok", "success")),
+                )
                 .order_by(SyncLogORM.created_at.desc()).limit(1)
             )
             last_err = db.scalar(

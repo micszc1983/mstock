@@ -684,6 +684,8 @@ def fetch_intraday_candles_from_yfinance(
         return []
 
     cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    now_dt = datetime.now(timezone.utc)
+    interval_minutes = int(resolution) if resolution.isdigit() else None
     result = []
     for ts_idx, row in df.iterrows():
         # yfinance zwraca indeks jako Timestamp (moze byc timezone-aware lub naive)
@@ -692,6 +694,12 @@ def fetch_intraday_candles_from_yfinance(
         else:
             ts_utc = ts_idx.to_pydatetime().replace(tzinfo=timezone.utc)
         if ts_utc < cutoff_dt:
+            continue
+        # Yahoo zwraca również aktualnie budowaną świecę. Sygnały wolno liczyć
+        # dopiero po końcu interwału (z minutą bufora na finalizację danych).
+        if interval_minutes is not None and ts_utc + timedelta(minutes=interval_minutes, seconds=60) > now_dt:
+            continue
+        if resolution == "D" and ts_utc.date() >= now_dt.date():
             continue
         result.append({
             "t": int(ts_utc.timestamp()),
@@ -725,46 +733,57 @@ def sync_intraday_candles(
     raw = fetch_intraday_candles_from_yfinance(fh_sym, resolution, lookback_hours)
 
     cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours + 1)
+    cutoff_naive = cutoff_dt.replace(tzinfo=None)
     existing_ts = set(
         db.scalars(
             select(IntradayCandleORM.timestamp)
             .where(
                 IntradayCandleORM.asset_id == asset.id,
                 IntradayCandleORM.resolution == resolution,
-                IntradayCandleORM.timestamp >= cutoff_dt,
+                IntradayCandleORM.timestamp >= cutoff_naive,
             )
         ).all()
     )
+    # Normalize to naive UTC for comparison (SQLite returns naive datetimes)
+    existing_ts_naive = {
+        dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+        for dt in existing_ts
+    }
 
     if not raw:
-        return {"new_candles": 0, "fetched_from_api": 0, "already_in_db": len(existing_ts)}
+        return {"new_candles": 0, "fetched_from_api": 0, "already_in_db": len(existing_ts_naive)}
 
     new_rows: list[IntradayCandleORM] = []
+    from app.services.ohlcv_validation import validate_bar
     for bar in raw:
         ts = datetime.fromtimestamp(bar["t"], tz=timezone.utc)
-        if ts in existing_ts:
+        ts_naive = ts.replace(tzinfo=None)
+        if ts_naive in existing_ts_naive:
             continue
-        new_rows.append(IntradayCandleORM(
+        candidate = IntradayCandleORM(
             asset_id=asset.id,
             resolution=resolution,
-            timestamp=ts,
+            timestamp=ts_naive,
             open=bar["o"],
             high=bar["h"],
             low=bar["l"],
             close=bar["c"],
             volume=bar["v"],
-        ))
+        )
+        if any(issue.severity == "critical" for issue in validate_bar(candidate)):
+            continue
+        new_rows.append(candidate)
 
     if not new_rows:
-        return {"new_candles": 0, "fetched_from_api": len(raw), "already_in_db": len(existing_ts)}
+        return {"new_candles": 0, "fetched_from_api": len(raw), "already_in_db": len(existing_ts_naive)}
 
     for row in new_rows:
-        db.merge(row)
+        db.add(row)
     db.flush()
 
     _compute_and_update_indicators(db, asset.id, resolution)
     db.commit()
-    return {"new_candles": len(new_rows), "fetched_from_api": len(raw), "already_in_db": len(existing_ts)}
+    return {"new_candles": len(new_rows), "fetched_from_api": len(raw), "already_in_db": len(existing_ts_naive)}
 
 
 def _compute_and_update_indicators(db: Session, asset_id: str, resolution: str) -> None:
@@ -775,9 +794,9 @@ def _compute_and_update_indicators(db: Session, asset_id: str, resolution: str) 
             IntradayCandleORM.asset_id == asset_id,
             IntradayCandleORM.resolution == resolution,
         )
-        .order_by(IntradayCandleORM.timestamp.asc())
+        .order_by(IntradayCandleORM.timestamp.desc())
         .limit(300)
-    ).all()
+    ).all()[::-1]
 
     if len(candles) < 2:
         return
@@ -1012,11 +1031,15 @@ def get_latest_signals(
 # ── Sync wszystkich aktywow ───────────────────────────────────────────────────
 
 def sync_all_intraday(db: Session, resolutions: list[str] = ["15", "60"]) -> dict[str, int]:
+    from app.services.market_calendar import is_market_open
     assets = db.scalars(
         select(AssetORM).where(AssetORM.type == "stock")
     ).all()
     results: dict[str, int] = {}
     for i, asset in enumerate(assets):
+        symbol = asset.price_symbol or asset.symbol or ""
+        if not is_market_open(symbol):
+            continue
         if i > 0:
             time.sleep(0.6)  # Finnhub rate limit
         total = 0

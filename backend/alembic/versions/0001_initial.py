@@ -18,6 +18,10 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Alembic domyślnie tworzy version_num jako VARCHAR(32). Starsze nazwy
+    # rewizji projektu są dłuższe; SQLite ignorował limit, PostgreSQL go egzekwuje.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)")
     op.create_table(
         "assets",
         sa.Column("id", sa.String(length=64), primary_key=True),

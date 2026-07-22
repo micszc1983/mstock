@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.asset_registry import ASSET_DEFINITIONS
-from app.db.models import AssetORM, PricePointORM
+from app.core.config import settings
+from app.db.models import AssetORM, PricePointORM, ThesisORM
 from app.repositories.news import upsert_news_item
 from app.schemas.common import NarrativeLabel
 from app.schemas.news import NewsItem
@@ -52,8 +53,58 @@ def seed_database(db: Session) -> None:
                 asset.metal_price_fn = a.metal_price_fn
     db.commit()
 
+    # Produkcja nigdy nie dostaje syntetycznych notowań. Testy potrzebują jednak
+    # stabilnego, offline'owego szeregu, żeby weryfikować cały pipeline.
+    if settings.testing:
+        _seed_test_market_data(db)
+
     # Sample newsy — ręcznie zredagowane, nie generowane losowo
     _seed_sample_news(db)
+
+
+def _seed_test_market_data(db: Session) -> None:
+    if db.query(PricePointORM).filter(PricePointORM.asset_id == "nvda").first():
+        return
+
+    start = (utc_now() - timedelta(days=200)).replace(hour=21, minute=0, second=0, microsecond=0)
+    prices: list[PricePointORM] = []
+    for day in range(80):
+        close = 100.0 + day * 0.45 + ((day % 7) - 3) * 0.18
+        open_price = close - 0.22
+        prices.append(PricePointORM(
+            asset_id="nvda",
+            timestamp=start + timedelta(days=day),
+            open=open_price,
+            high=max(open_price, close) + 0.8,
+            low=min(open_price, close) - 0.8,
+            close=close,
+            volume=1_000_000.0 + day * 2_500.0,
+        ))
+    db.add_all(prices)
+    db.flush()
+
+    # Teza ma historyczny punkt wejścia i pełne przyszłe okna 1/5/20 dni.
+    # generated_at jest najnowsze, więc test pojedynczej ewaluacji wybiera ją
+    # także po przebudowie bieżącego snapshotu.
+    source_at = prices[35].timestamp
+    db.add(ThesisORM(
+        asset_id="nvda",
+        generated_at=utc_now() + timedelta(minutes=1),
+        source_snapshot_at=source_at,
+        regime="risk_on",
+        regime_confidence=0.78,
+        dominant_narrative="ai_growth",
+        thesis_confidence=0.76,
+        fragility_score=24.0,
+        divergence_score=12.0,
+        thesis="Trend wzrostowy jest wspierany przez dodatni momentum.",
+        anti_thesis="Spadek popytu może podważyć scenariusz.",
+        support_factors_json='["trend", "momentum"]',
+        risk_factors_json='["volatility"]',
+        invalidation_conditions_json='["close below support"]',
+        model_name="test_fixture_v1",
+    ))
+    db.commit()
 
 
 def _seed_sample_news(db: Session) -> None:

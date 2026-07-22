@@ -61,7 +61,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                 points = []
 
             # 2. GPW API (gpw-api.p.rapidapi.com) — fallback, limit dzienny
-            if not points and settings.rapidapi_api_key:
+            if not points and settings.rapidapi_api_key and not settings.testing:
                 try:
                     provider = "rapidapi:gpw-api"
                     points = fetch_gpw_prices_from_rapidapi(symbol)
@@ -73,7 +73,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     points = []
 
             # 3. RapidAPI Yahoo Finance — fallback (wymaga subskrypcji yahoo-finance15)
-            if not points and settings.rapidapi_api_key:
+            if not points and settings.rapidapi_api_key and not settings.testing:
                 try:
                     provider = "rapidapi:yahoo-finance"
                     points = fetch_stock_prices_from_rapidapi(symbol)
@@ -99,7 +99,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         # ── US stocks: Massive → Twelvedata → RapidAPI → AV → Finnhub ─
         else:
             # 1. Massive.com — priorytet: 2 lata historii, brak limitu dziennego
-            if settings.massive_api_key:
+            if settings.massive_api_key and not settings.testing:
                 try:
                     provider = "massive:bars"
                     points = fetch_stock_prices_from_massive(asset.symbol or symbol)
@@ -111,7 +111,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     points = []
 
             # 2. Twelve Data — 20 lat historii, 800 req/dzień
-            if not points and settings.twelvedata_api_key:
+            if not points and settings.twelvedata_api_key and not settings.testing:
                 try:
                     provider = "twelvedata:time_series"
                     points = fetch_stock_prices_from_twelvedata(asset.symbol or symbol)
@@ -123,7 +123,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     points = []
 
             # 3. RapidAPI Yahoo Finance — obsługuje US stocks też
-            if not points and settings.rapidapi_api_key:
+            if not points and settings.rapidapi_api_key and not settings.testing:
                 try:
                     provider = "rapidapi:yahoo-finance"
                     points = fetch_stock_prices_from_rapidapi(asset.symbol or symbol)
@@ -144,7 +144,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     points = []
 
             # 6. Finnhub quote — ostatni fallback: tylko dzisiejszy punkt
-            if not points and settings.finnhub_api_key:
+            if not points and settings.finnhub_api_key and not settings.testing:
                 try:
                     fh_symbol = asset.symbol or symbol
                     provider = "finnhub:quote"
@@ -186,13 +186,19 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         else:
             raise HTTPException(status_code=400, detail=f"No price_symbol or metal_price_fn configured for {asset.id}.")
 
+    from app.services.ohlcv_validation import validate_bar
+    rejected = 0
     for point in points:
+        if any(issue.severity == "critical" for issue in validate_bar(point)):
+            rejected += 1
+            continue
         if upsert_price_point(db, asset.id, point):
             inserted += 1
         else:
             skipped += 1
     db.commit()
-    return SyncResponse(asset_id=asset.id, provider=provider, inserted=inserted, skipped=skipped, detail="Price sync completed")
+    return SyncResponse(asset_id=asset.id, provider=provider, inserted=inserted, skipped=skipped,
+                        detail=f"Price sync completed; rejected_invalid={rejected}")
 
 
 def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
@@ -204,7 +210,17 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
     news_sym = asset.news_symbol or legacy.get("news_symbol")
     term = asset.news_term or legacy.get("news_term") or asset.name
 
-    if asset.type == AssetType.STOCK.value and news_sym and settings.finnhub_api_key:
+    # Testy integracyjne muszą być całkowicie deterministyczne i nie mogą
+    # przypadkiem używać prawdziwych kluczy z backend/.env.
+    if settings.testing:
+        if asset.type == AssetType.STOCK.value and news_sym:
+            provider = "finnhub:company-news:test"
+            items = fetch_company_news_from_finnhub(news_sym, asset.id, asset_type)
+        else:
+            provider = "alphavantage:NEWS_SENTIMENT:test"
+            items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
+
+    elif asset.type == AssetType.STOCK.value and news_sym and settings.finnhub_api_key:
         # US stocks z news_symbol — Finnhub company-news (najlepsze źródło dla US)
         provider = "finnhub:company-news"
         items = fetch_company_news_from_finnhub(news_sym, asset.id, asset_type)
@@ -265,7 +281,7 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
 
 
 def log_sync_success(db: Session, asset_id: str, sync_type: str, result: SyncResponse) -> None:
-    add_sync_log(db, asset_id, sync_type, result.provider, result.inserted, result.skipped, "ok", result.detail)
+    add_sync_log(db, asset_id, sync_type, result.provider, result.inserted, result.skipped, "success", result.detail)
     db.commit()
 
 
