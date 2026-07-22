@@ -52,6 +52,7 @@ frontend/vite.config.d.ts
 
 # ── Testy i narzędzia ─────────────────────────────────────────────────────────
 .pytest_cache/
+backend/.pytest_release_tmp/
 .mypy_cache/
 .ruff_cache/
 htmlcov/

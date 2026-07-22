@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -17,11 +18,36 @@ router = APIRouter(prefix="/assets", tags=["intraday"])
 
 
 def _asset_or_404(db: Session, asset_id: str) -> AssetORM:
-    from sqlalchemy import select
     asset = db.scalars(select(AssetORM).where(AssetORM.id == asset_id)).first()
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
     return asset
+
+
+@router.get("/intraday/signals-summary")
+def intraday_signals_summary(
+    resolution: str = Query("15", pattern=r"^(5|15|30|60|D)$"),
+    db: Session = Depends(get_db),
+):
+    """Lekki, zbiorczy stan BUY/SELL dla selektora aktywów.
+
+    Zastępuje osobne żądanie HTTP dla każdej spółki. Sygnały są liczone
+    wyłącznie z zapisanych świec; endpoint nie uruchamia synchronizacji danych.
+    """
+    asset_ids = db.scalars(
+        select(AssetORM.id).where(AssetORM.type == "stock").order_by(AssetORM.id)
+    ).all()
+    summary: dict[str, str | None] = {}
+    for asset_id in asset_ids:
+        payload = get_latest_signals(db, asset_id, resolution=resolution)
+        signals = payload.get("signals", [])
+        if any(signal.get("type") == "BUY" and signal.get("strength", 0) >= 0.6 for signal in signals):
+            summary[asset_id] = "BUY"
+        elif any(signal.get("type") == "SELL" and signal.get("strength", 0) >= 0.6 for signal in signals):
+            summary[asset_id] = "SELL"
+        else:
+            summary[asset_id] = None
+    return {"resolution": resolution, "signals": summary}
 
 
 @router.get("/{asset_id}/intraday/candles")

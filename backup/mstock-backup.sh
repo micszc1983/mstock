@@ -1,93 +1,87 @@
-#!/bin/bash
-# =============================================================================
-# CODZIENNY BACKUP MSTOCK → QNAP NAS
-# Uruchamiany automatycznie przez cron o 3:00 w nocy.
-# Wymaga wcześniejszego uruchomienia setup-nas-ssh.sh
-# =============================================================================
-
+#!/usr/bin/env bash
+# Codzienny backup MStock 1.0: PostgreSQL + modele ML -> QNAP NAS.
 set -euo pipefail
 
-# ── Konfiguracja ─────────────────────────────────────────────────────────────
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BACKEND_DIR="$PROJECT_DIR/backend"
+MODELS_DIR="$BACKEND_DIR/ml_models"
+LOG_FILE="$PROJECT_DIR/backup/backup.log"
+
 NAS_USER="dev"
 NAS_HOST="192.168.0.200"
 NAS_BASE="/share/Pliki_ms/dev_backup/mstock"
 KEY_FILE="$HOME/.ssh/nas_mstock"
-
-BACKEND_DIR="/home/tt38dn/MStock/backend"
-DB_FILE="$BACKEND_DIR/thesislab.db"
-MODELS_DIR="$BACKEND_DIR/ml_models"
-
-LOG_FILE="/run/media/tt38dn/dane2/Gielda-fixed/backup/backup.log"
-TMP_DB="/tmp/mstock-backup-$(date +%s).db"
-
-DATE=$(date +%Y-%m-%d)
+DATE="$(date +%Y-%m-%d)"
 NAS_DIR="$NAS_BASE/$DATE"
 NAS="$NAS_USER@$NAS_HOST"
+TMP_DUMP="$(mktemp /tmp/mstock-backup-XXXXXX.dump)"
 
-# ── Funkcje ──────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
-
-cleanup() { rm -f "$TMP_DB"; }
+cleanup() { rm -f "$TMP_DUMP"; }
 trap cleanup EXIT
 
-# ── Start ────────────────────────────────────────────────────────────────────
-log "========================================"
-log "Backup $DATE — start"
+load_postgres_connection() {
+  eval "$(cd "$BACKEND_DIR" && .venv/bin/python3 - <<'PY'
+import shlex
+from sqlalchemy.engine import make_url
+from app.core.config import settings
 
-# Sprawdź czy NAS osiągalny
-if ! ping -c1 -W3 "$NAS_HOST" &>/dev/null; then
-    log "BŁĄD: NAS $NAS_HOST niedostępny — backup pominięty"
-    exit 1
+url = make_url(settings.database_url)
+if not url.drivername.startswith("postgresql"):
+    raise SystemExit("Backup 1.0 wymaga DATABASE_URL wskazującego PostgreSQL")
+values = {
+    "PGHOST": url.host or "localhost",
+    "PGPORT": url.port or 5432,
+    "PGUSER": url.username or "",
+    "PGPASSWORD": url.password or "",
+    "PGDATABASE": url.database or "",
+}
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+)"
+  export PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+}
+
+log "========================================"
+log "Backup PostgreSQL $DATE — start"
+
+if ! ping -c1 -W3 "$NAS_HOST" >/dev/null 2>&1; then
+  log "BŁĄD: NAS $NAS_HOST niedostępny"
+  exit 1
+fi
+if [ ! -f "$KEY_FILE" ]; then
+  log "BŁĄD: brak klucza $KEY_FILE"
+  exit 1
 fi
 
-# Utwórz folder dnia na NAS
-ssh -i "$KEY_FILE" -o ConnectTimeout=10 "$NAS" "mkdir -p $NAS_DIR"
+load_postgres_connection
+ssh -i "$KEY_FILE" -o ConnectTimeout=10 "$NAS" "mkdir -p '$NAS_DIR'"
 
-# ── 1. Baza danych (bezpieczna kopia SQLite przez Python) ────────────────────
-log "Kopia bazy danych..."
-python3 - <<EOF
-import sqlite3, shutil, sys
-src = "$DB_FILE"
-dst = "$TMP_DB"
-try:
-    src_conn = sqlite3.connect(src)
-    dst_conn = sqlite3.connect(dst)
-    src_conn.backup(dst_conn)
-    dst_conn.close()
-    src_conn.close()
-    print("SQLite backup OK")
-except Exception as e:
-    print(f"BŁĄD backup: {e}", file=sys.stderr)
-    sys.exit(1)
-EOF
-BACKUP_SIZE=$(du -sh "$TMP_DB" | cut -f1)
-rsync -az --progress \
-    -e "ssh -i $KEY_FILE -o ConnectTimeout=10" \
-    "$TMP_DB" "$NAS:$NAS_DIR/thesislab.db"
-log "  Baza OK — $BACKUP_SIZE"
+log "Tworzenie spójnego dumpa PostgreSQL..."
+pg_dump --format=custom --no-owner --file="$TMP_DUMP"
+pg_restore --list "$TMP_DUMP" >/dev/null
+DUMP_SIZE="$(du -sh "$TMP_DUMP" | cut -f1)"
+rsync -az -e "ssh -i $KEY_FILE -o ConnectTimeout=10" \
+  "$TMP_DUMP" "$NAS:$NAS_DIR/mstock.dump"
+log "  Baza OK — $DUMP_SIZE, format zweryfikowany przez pg_restore"
 
-# ── 2. Modele ML (tylko zmienione pliki — delta sync) ────────────────────────
-log "Kopia modeli ML..."
-MODEL_COUNT=$(ls "$MODELS_DIR"/*.joblib 2>/dev/null | wc -l)
-rsync -az --delete \
-    -e "ssh -i $KEY_FILE -o ConnectTimeout=10" \
+if [ -d "$MODELS_DIR" ]; then
+  MODEL_COUNT="$(find "$MODELS_DIR" -maxdepth 1 -type f -name '*.joblib' | wc -l)"
+  rsync -az --delete -e "ssh -i $KEY_FILE -o ConnectTimeout=10" \
     "$MODELS_DIR/" "$NAS:$NAS_DIR/ml_models/"
-log "  Modele OK — $MODEL_COUNT plików"
+  log "  Modele OK — $MODEL_COUNT plików"
+else
+  log "  Modele: katalog nie istnieje — pominięto"
+fi
 
-# ── 3. Suma kontrolna bazy (wykryj uszkodzone kopie) ─────────────────────────
-DB_CHECKSUM=$(md5sum "$TMP_DB" | cut -d' ' -f1)
-ssh -i "$KEY_FILE" "$NAS" \
-    "echo '$DB_CHECKSUM  thesislab.db' > $NAS_DIR/thesislab.db.md5"
-log "  Checksum: $DB_CHECKSUM"
+CHECKSUM="$(sha256sum "$TMP_DUMP" | cut -d' ' -f1)"
+ssh -i "$KEY_FILE" "$NAS" "printf '%s  %s\n' '$CHECKSUM' 'mstock.dump' > '$NAS_DIR/mstock.dump.sha256'"
+log "  SHA-256: $CHECKSUM"
 
-# ── 4. Usuń kopie starsze niż 30 dni ─────────────────────────────────────────
-log "Czyszczenie starych backupów (>30 dni)..."
-DELETED=$(ssh -i "$KEY_FILE" "$NAS" \
-    "find $NAS_BASE -maxdepth 1 -type d -name '20*' -mtime +30 \
-     -exec rm -rf {} + -print 2>/dev/null | wc -l")
-log "  Usunięto: $DELETED starych folderów"
-
-# ── Podsumowanie ─────────────────────────────────────────────────────────────
-TOTAL=$(ssh -i "$KEY_FILE" "$NAS" "du -sh $NAS_DIR" | cut -f1)
-log "Backup $DATE — ZAKOŃCZONY pomyślnie (łącznie: $TOTAL)"
+log "Czyszczenie backupów starszych niż 30 dni..."
+DELETED="$(ssh -i "$KEY_FILE" "$NAS" \
+  "find '$NAS_BASE' -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime +30 -print -exec rm -rf -- {} +" | wc -l)"
+TOTAL="$(ssh -i "$KEY_FILE" "$NAS" "du -sh '$NAS_DIR'" | cut -f1)"
+log "Backup zakończony: $TOTAL, usunięte stare katalogi: $DELETED"
 log "========================================"

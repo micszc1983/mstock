@@ -15,7 +15,9 @@ fi
 
 pkill -f "uvicorn main:app" 2>/dev/null
 pkill -f "npm run dev" 2>/dev/null
+pkill -f "npm run serve" 2>/dev/null
 pkill -f "vite" 2>/dev/null
+pkill -f "frontend/server.mjs" 2>/dev/null
 pkill -f "node.*5173" 2>/dev/null
 
 echo "Zatrzymano backend i frontend."

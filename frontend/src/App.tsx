@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Brain,
@@ -68,12 +68,13 @@ import { KpiCard } from "./components/KpiCard";
 import { ColTip } from "./components/Tip";
 import { PageContainer, Section } from "./components/Layout";
 import { MetaRow, Panel, Pill } from "./components/Panel";
-import { Portfolio } from "./components/Portfolio";
-import { IntradayTab } from "./components/IntradayTab";
-import { SimulatorTab } from "./components/SimulatorTab";
-import { AlertsConfigTab } from "./components/AlertsConfigTab";
-import { PaperTradingTab } from "./components/PaperTradingTab";
-import { CalibrationAuditTab } from "./components/CalibrationAuditTab";
+
+const Portfolio = lazy(() => import("./components/Portfolio").then(module => ({ default: module.Portfolio })));
+const IntradayTab = lazy(() => import("./components/IntradayTab").then(module => ({ default: module.IntradayTab })));
+const SimulatorTab = lazy(() => import("./components/SimulatorTab").then(module => ({ default: module.SimulatorTab })));
+const AlertsConfigTab = lazy(() => import("./components/AlertsConfigTab").then(module => ({ default: module.AlertsConfigTab })));
+const PaperTradingTab = lazy(() => import("./components/PaperTradingTab").then(module => ({ default: module.PaperTradingTab })));
+const CalibrationAuditTab = lazy(() => import("./components/CalibrationAuditTab").then(module => ({ default: module.CalibrationAuditTab })));
 
 function humanizeError(message: string) {
   const lower = message.toLowerCase();
@@ -851,6 +852,12 @@ async function notifyFirstEmail() {
           >{id === "toppicks" ? `⭐ Top Picks (${topPicks.length})` : label}</button>
         ))}
       </div>
+
+      <Suspense fallback={
+        <Section title="Ładowanie modułu">
+          <p style={{ color: "var(--text-2)" }}>Trwa przygotowywanie wybranego widoku…</p>
+        </Section>
+      }>
 
       {/* ── Zakładka Tezy ────────────────────────────────────────────────── */}
       {activeTab === "theses" && <>
@@ -3423,6 +3430,8 @@ async function notifyFirstEmail() {
       {activeTab === "alerts-config" && (
         <AlertsConfigTab />
       )}
+
+      </Suspense>
 
     </PageContainer>
   );}

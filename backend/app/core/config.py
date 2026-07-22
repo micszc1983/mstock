@@ -8,7 +8,7 @@ try:
 
     class Settings(BaseSettings):
         app_name: str = "MStock"
-        app_version: str = "0.4.0"
+        app_version: str = "1.0.0"
         database_url: str = "sqlite:///./mstock.db"
         alphavantage_api_key: str = ""
         finnhub_api_key: str = ""
@@ -97,7 +97,7 @@ except ImportError:
     @dataclass(slots=True)
     class Settings:  # type: ignore[no-redef]
         app_name: str = "MStock"
-        app_version: str = "0.4.0"
+        app_version: str = "1.0.0"
         database_url: str = os.getenv("DATABASE_URL", "sqlite:///./mstock.db")
         alphavantage_api_key: str = os.getenv("ALPHAVANTAGE_API_KEY", "")
         finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")

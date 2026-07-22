@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import List, Optional
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -409,7 +409,7 @@ class PortfolioPositionORM(Base):
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), unique=True, index=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_buy_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class EnsembleRecordORM(Base):
@@ -447,8 +447,8 @@ class EarningsORM(Base):
     eps_surprise_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # (actual-est)/|est|*100
     surprise_label: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)   # BEAT|MISS|MEET
     is_upcoming: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class InsiderTradeORM(Base):
@@ -465,7 +465,7 @@ class InsiderTradeORM(Base):
     price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(20), default="finnhub")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class ShortInterestORM(Base):
@@ -477,7 +477,7 @@ class ShortInterestORM(Base):
     shares_short: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     short_percent_float: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     short_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class IntradayCandleORM(Base):
@@ -516,7 +516,7 @@ class EarningsCallAnalysisORM(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     earnings_id: Mapped[int] = mapped_column(ForeignKey("earnings.id"), unique=True, index=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
-    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.utcnow())
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     tone_score: Mapped[int] = mapped_column(Integer)            # 1–5 (1=bardzo niedźwiedzi, 5=bardzo bycze)
     guidance_change: Mapped[str] = mapped_column(String(16))    # raised/lowered/maintained/none
     key_themes_json: Mapped[str] = mapped_column(Text)          # JSON list[str]
@@ -534,7 +534,7 @@ class IntradayBacktestORM(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
     resolution: Mapped[str] = mapped_column(String(8), default="15")
-    run_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.utcnow())
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     lookback_days: Mapped[int] = mapped_column(Integer, default=30)
     candles_count: Mapped[int] = mapped_column(Integer, default=0)
     total_signals: Mapped[int] = mapped_column(Integer, default=0)

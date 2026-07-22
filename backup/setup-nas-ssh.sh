@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
 # JEDNORAZOWA KONFIGURACJA SSH DO QNAP NAS
 # Uruchom raz: bash setup-nas-ssh.sh
@@ -9,12 +9,18 @@ NAS_USER="dev"
 NAS_HOST="192.168.0.200"
 KEY_FILE="$HOME/.ssh/nas_mstock"
 
-echo ">>> Generowanie klucza SSH (bez hasła — do cron)..."
-ssh-keygen -t ed25519 -f "$KEY_FILE" -N "" -C "mstock-backup@$(hostname)"
+set -euo pipefail
+
+if [ ! -f "$KEY_FILE" ]; then
+    echo ">>> Generowanie dedykowanego klucza SSH do backupu..."
+    ssh-keygen -t ed25519 -f "$KEY_FILE" -N "" -C "mstock-backup@$(hostname)"
+else
+    echo ">>> Klucz $KEY_FILE już istnieje — używam istniejącego."
+fi
 
 echo ""
 echo ">>> Kopiowanie klucza publicznego na QNAP NAS..."
-echo "    Zostaniesz poproszony o hasło użytkownika '$NAS_USER' — wpisz: Lenovos10!"
+echo "    Zostaniesz poproszony o hasło użytkownika '$NAS_USER'."
 echo ""
 ssh-copy-id -i "$KEY_FILE.pub" -p 22 "${NAS_USER}@${NAS_HOST}"
 

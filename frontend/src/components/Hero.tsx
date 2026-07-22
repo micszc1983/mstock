@@ -129,33 +129,30 @@ function useProviderStatus(apiBase: string, syncCounter?: number) {
   return status;
 }
 
-function useIntradaySignals(apiBase: string, assets: Asset[]) {
+function useIntradaySignals(apiBase: string, ready: boolean) {
   const [intradayMap, setIntradayMap] = useState<Map<string, "BUY" | "SELL" | null>>(new Map());
   useEffect(() => {
-    const stockIds = assets.filter(a => a.type === "stock").map(a => a.id);
-    if (stockIds.length === 0) return;
+    if (!ready) return;
+    const controller = new AbortController();
     async function fetchAll() {
-      const results = await Promise.all(
-        stockIds.map(async id => {
-          try {
-            const r = await fetch(`${apiBase}/assets/${id}/intraday/signals?resolution=15`);
-            if (!r.ok) return [id, null] as const;
-            const d = await r.json();
-            const sigs: Array<{ type: string; strength: number }> = d.signals ?? [];
-            if (sigs.some(s => s.type === "BUY" && s.strength >= 0.6)) return [id, "BUY"] as const;
-            if (sigs.some(s => s.type === "SELL" && s.strength >= 0.6)) return [id, "SELL"] as const;
-            return [id, null] as const;
-          } catch {
-            return [id, null] as const;
-          }
-        })
-      );
-      setIntradayMap(new Map(results));
+      try {
+        const response = await fetch(`${apiBase}/assets/intraday/signals-summary?resolution=15`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const payload: { signals?: Record<string, "BUY" | "SELL" | null> } = await response.json();
+        setIntradayMap(new Map(Object.entries(payload.signals ?? {})));
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
     }
-    fetchAll();
+    void fetchAll();
     const id = setInterval(fetchAll, 5 * 60 * 1000);
-    return () => clearInterval(id);
-  }, [apiBase, assets]);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, [apiBase, ready]);
   return intradayMap;
 }
 
@@ -432,7 +429,7 @@ export function Hero({
   const providers        = useProviderStatus(apiBase, syncCounter);
   const isSyncing        = useSyncStatus(apiBase, syncing);
   const marketCountdowns = useMarketCountdowns();
-  const intradaySignals  = useIntradaySignals(apiBase, assets);
+  const intradaySignals  = useIntradaySignals(apiBase, assets.some(asset => asset.type === "stock"));
 
   const [, tick] = useState(0);
   useEffect(() => { const id = setInterval(() => tick(n => n + 1), 30_000); return () => clearInterval(id); }, []);

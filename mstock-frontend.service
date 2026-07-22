@@ -1,7 +1,8 @@
 [Unit]
-Description=MStock Frontend (Vite dev server)
+Description=MStock Frontend 1.0 (production static server)
 After=network.target mstock-backend.service
 Wants=mstock-backend.service
+ConditionPathExists=/home/tt38dn/MStock/frontend/dist/index.html
 
 [Service]
 Type=simple
@@ -9,10 +10,23 @@ User=tt38dn
 Group=tt38dn
 WorkingDirectory=/home/tt38dn/MStock/frontend
 
-ExecStart=/usr/bin/npm run dev -- --host 0.0.0.0
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=5173
+
+ExecStart=/usr/bin/node /home/tt38dn/MStock/frontend/server.mjs
 
 Restart=on-failure
 RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+UMask=0027
 
 StandardOutput=journal
 StandardError=journal

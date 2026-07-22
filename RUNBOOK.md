@@ -1,106 +1,103 @@
-# ThesisLab Runbook
+# MStock 1.0.0 — runbook
 
-## Start
+## Wdrożenie
+
 ```bash
-chmod +x start.sh stop.sh
-./start.sh
+cd /home/tt38dn/MStock
+sudo ./install-service.sh
 ```
 
-## Stop
+Frontend musi działać jako `production static server`, a nie `Vite dev server`:
+
 ```bash
-./stop.sh
+systemctl status mstock-frontend --no-pager
+curl -fsS http://127.0.0.1:5173/healthz
 ```
 
-## Gdzie wpisać klucze API
-Plik:
-```bash
-backend/.env
+Oczekiwany health:
+
+```json
+{"status":"ok","version":"1.0.0"}
 ```
 
-Przykład:
+## Codzienna kontrola
+
 ```bash
-DATABASE_URL=sqlite:///./thesislab.db
-ALPHAVANTAGE_API_KEY=twoj_klucz_alpha_vantage
-FINNHUB_API_KEY=twoj_klucz_finnhub
-
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USERNAME=twoj_smtp_user
-SMTP_PASSWORD=twoje_haslo
-SMTP_FROM_EMAIL=alerts@example.com
-
-TWILIO_ACCOUNT_SID=twoj_twilio_sid
-TWILIO_AUTH_TOKEN=twoj_twilio_token
-TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
-REPORTS_DIR=./generated_reports
+systemctl is-active mstock-backend mstock-frontend
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:5173/healthz
+journalctl -u mstock-backend -u mstock-frontend --since today --no-pager
 ```
 
-## Gdy SQLite zgłasza konflikt migracji
-Najpierw:
+Sprawdź w UI jakość danych, scheduler, status providerów i stany modeli `live/shadow/degraded`.
+
+## Restart
+
+Jednostki są systemowe — nie używaj `systemctl --user`:
+
 ```bash
-./stop.sh
-./start.sh
+sudo systemctl restart mstock-backend mstock-frontend
 ```
 
-Skrypt próbuje automatycznie naprawić typowy konflikt `table already exists`.
+## Smoke test po wdrożeniu
 
-Jeśli to nadal dev i nie potrzebujesz danych:
 ```bash
-cd backend
-rm -f thesislab.db
-source .venv/bin/activate
-alembic upgrade head
-cd ..
-./start.sh
+curl -fsS http://127.0.0.1:5173/healthz
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/assets >/dev/null
+curl -fsS 'http://127.0.0.1:8000/assets/intraday/signals-summary?resolution=15' >/dev/null
 ```
 
-## Szybka diagnostyka
+Następnie otwórz aplikację w świeżej karcie telefonu, wybierz inne aktywo, zamknij kartę i sprawdź przywrócenie wyboru.
+
+## Backup PostgreSQL
+
 ```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/assets
-curl -X POST http://127.0.0.1:8000/assets/aapl/bootstrap
+./backup/mstock-backup.sh
+tail -n 50 backup/backup.log
 ```
 
+Backup jest poprawny tylko wtedy, gdy `pg_restore --list` przejdzie pomyślnie i na NAS istnieje zgodna suma `mstock.dump.sha256`.
 
-## Audit-fix changes
-This package additionally:
-- removes `Base.metadata.create_all(...)` from backend startup
-- adds shared `backend/app/utils/datetime.py`
-- normalizes UTC handling in analytics, feature builder, outcomes and alerts
-- secures report download route to `/reports/download/{file_name}`
-- fixes `Hero.tsx` / `App.tsx` prop mismatch
+## Restore PostgreSQL
 
+Restore jest operacją destrukcyjną i wymaga jawnego potwierdzenia. Skrypt przed zmianą tworzy dump bezpieczeństwa bieżącej bazy.
 
-## ML foundation
-Dodane endpointy:
-- `GET /ml/status`
-- `POST /ml/mode`
-- `POST /ml/dataset/build`
-- `GET /ml/dataset/stats`
-- `POST /ml/models/train`
-- `GET /ml/models`
-- `POST /ml/backtests/run`
-- `GET /ml/backtests`
-- `POST /assets/{asset_id}/ml/score`
-- `GET /assets/{asset_id}/ml/prediction/latest`
+```bash
+sudo systemctl stop mstock-backend
+./backup/restore-postgres.sh /ścieżka/mstock.dump --confirm
+sudo systemctl start mstock-backend
+curl -fsS http://127.0.0.1:8000/health
+```
 
-Workflow:
-1. pozwól systemowi zbierać dane przez dni/tygodnie
-2. uruchom build dataset
-3. gdy liczba wierszy będzie sensowna, wytrenuj model
-4. uruchom backtest
-5. przełącz tryb heurystyka/ML w interfejsie
+## Diagnostyka
 
+```bash
+systemctl status mstock-backend mstock-frontend --no-pager -l
+journalctl -u mstock-backend -n 200 --no-pager
+journalctl -u mstock-frontend -n 100 --no-pager
+ss -ltnp | grep -E ':8000|:5173'
+```
 
-## Walk-forward and comparison
-Dodane endpointy:
-- `POST /ml/backtests/walkforward`
-- `POST /assets/{asset_id}/evaluation/compare`
-- `GET /assets/{asset_id}/evaluation/latest`
-- `GET /evaluation/comparisons`
+### Biała strona
 
-Po treningu modelu możesz:
-1. uruchomić zwykły backtest
-2. uruchomić walk-forward backtest
-3. porównać heurystykę z ML dla wybranego aktywa
-4. obserwować w UI, który tryb jest obecnie lepszy
+W wydaniu 1.0 frontend nie korzysta z cache zależności Vite dev. Sprawdź:
+
+```bash
+curl -I http://127.0.0.1:5173/
+curl -fsS http://127.0.0.1:5173/healthz
+```
+
+HTML ma `Cache-Control: no-store`, natomiast pliki z hashem w `/assets/` mają cache `immutable`.
+
+### ML nie jest live
+
+To nie jest awaria. Automat dopuszcza model dopiero po spełnieniu progów jakości, liczebności, kalibracji, kosztów i monitoringu. Do tego czasu system używa heurystyki, a model pracuje w `shadow`.
+
+## Powrót do poprzedniego wydania
+
+1. zatrzymaj usługi,
+2. przywróć poprzedni zatwierdzony commit/tag,
+3. odtwórz zgodny dump, jeśli wydanie zmieniło schemat,
+4. uruchom `sudo ./install-service.sh`,
+5. wykonaj smoke test.

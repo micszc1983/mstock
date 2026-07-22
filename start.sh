@@ -91,11 +91,13 @@ if [ ! -d "node_modules" ]; then
   npm install >/dev/null
 fi
 
+npm run build
+
 if [ -f "$PROJECT_DIR/frontend.pid" ] && kill -0 "$(cat "$PROJECT_DIR/frontend.pid")" >/dev/null 2>&1; then
   echo "Frontend already running"
 else
-  echo "Starting frontend..."
-  nohup npm run dev -- --host 0.0.0.0 > "$PROJECT_DIR/frontend.log" 2>&1 &
+  echo "Starting production frontend..."
+  nohup npm run serve > "$PROJECT_DIR/frontend.log" 2>&1 &
   echo $! > "$PROJECT_DIR/frontend.pid"
 fi
 

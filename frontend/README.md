@@ -1,22 +1,21 @@
-# ThesisLab Frontend
+# MStock Frontend 1.0.0
 
-## Setup
+## Development
+
 ```bash
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-## Notes
-- Frontend runs on `http://127.0.0.1:5173`
-- Set backend URL in `.env`:
+## Production
+
 ```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000
+npm run build
+npm run serve
 ```
 
+`npm run build` tworzy wersjonowane assety oraz ich warianty Brotli/Gzip. `npm run serve` udostępnia wyłącznie katalog `dist`, ustawia bezpieczne nagłówki i endpoint `/healthz`.
 
-## Obsługa błędów i naprawa aktywa
-Frontend ma:
-- bardziej czytelne komunikaty błędów przez `humanizeError`
-- przycisk **Napraw / bootstrap asset**, który wywołuje:
-  - `POST /assets/{asset_id}/bootstrap`
+Domyślny adres to `http://0.0.0.0:5173`. Opcjonalne zmienne procesu: `HOST` oraz `PORT`.
+
+API jest automatycznie kierowane na port `8000` bieżącego hosta. `VITE_API_BASE_URL` służy tylko do jawnego nadpisania adresu podczas buildu.
