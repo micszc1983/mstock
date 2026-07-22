@@ -95,6 +95,22 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[startup] seed BŁĄD: {exc}")
 
+        try:
+            from app.repositories.sync_logs import redact_existing_sync_log_secrets
+            provider_secrets = tuple(value for value in (
+                settings.eodhd_api_key, settings.alphavantage_api_key,
+                settings.finnhub_api_key, settings.newsapi_api_key,
+                settings.massive_api_key, settings.twelvedata_api_key,
+                settings.rapidapi_api_key,
+            ) if value)
+            redacted = redact_existing_sync_log_secrets(db, provider_secrets)
+            if redacted:
+                db.commit()
+                print(f"[startup] oczyszczono sekrety w {redacted} historycznych logach synchronizacji")
+        except Exception as exc:
+            db.rollback()
+            print(f"[startup] redakcja logów pominięta: {exc}")
+
         if settings.startup_rebuild_enabled:
             try:
                 assets = list_assets(db)

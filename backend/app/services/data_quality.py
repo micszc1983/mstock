@@ -376,6 +376,11 @@ def _analyze_sync(db: Session, asset_id: str) -> SyncQuality:
         .order_by(SyncLogORM.created_at.desc())
     ).all()
 
+    # Do niezawodności synchronizacji zaliczamy wyłącznie końcowe wyniki zadań.
+    # Diagnostyczne błędy pośrednich providerów (np. *_fallback) nie mogą
+    # zamieniać udanego fallbacku w pozorny 100% error rate.
+    terminal_logs = [log for log in logs_7d if log.sync_type in {"prices", "news"}]
+
     # Rozróżnij rate-limit (spodziewany przy darmowych kluczach) od prawdziwych błędów
     _RATE_LIMIT_SIGNALS = ("rate limit", "note", "api limit", "api key", "25 requests",
                             "premium", "quota", "too many", "daily limit")
@@ -384,9 +389,9 @@ def _analyze_sync(db: Session, asset_id: str) -> SyncQuality:
         d = (detail or "").lower()
         return any(s in d for s in _RATE_LIMIT_SIGNALS)
 
-    errors_all_24h = [l for l in logs_7d
+    errors_all_24h = [l for l in terminal_logs
                       if l.status == "error" and ensure_utc(l.created_at) >= cutoff_24h]
-    errors_all_7d  = [l for l in logs_7d if l.status == "error"]
+    errors_all_7d  = [l for l in terminal_logs if l.status == "error"]
 
     # Błędy konfiguracji = prawdziwe błędy, nie rate-limity
     config_errors_24h = [l for l in errors_all_24h if not _is_rate_limit(l.detail or "")]
@@ -394,11 +399,11 @@ def _analyze_sync(db: Session, asset_id: str) -> SyncQuality:
 
     errors_24h = len(config_errors_24h)
     errors_7d  = len(config_errors_7d)
-    total_7d   = len(logs_7d)
+    total_7d   = len(terminal_logs)
     error_rate = round(len(errors_all_7d) / max(1, total_7d), 3)
 
     last_ok = next(
-        (ensure_utc(l.created_at) for l in logs_7d if l.status in {"ok", "success"}), None
+        (ensure_utc(l.created_at) for l in terminal_logs if l.status in {"ok", "success"}), None
     )
     # Pokaż ostatni prawdziwy błąd konfiguracji, nie rate-limit
     last_error_msg = next(

@@ -22,9 +22,14 @@ router = APIRouter(tags=["sync"])
 @router.get("/config/providers")
 def provider_config() -> dict[str, object]:
     return {
-        "price_provider": "Alpha Vantage",
+        "price_provider_gpw": "EODHD -> Yahoo Finance",
+        "price_provider_usa": "Massive -> Twelve Data -> Alpha Vantage -> Finnhub",
         "stock_news_provider": "Finnhub",
         "search_news_provider": "Alpha Vantage",
+        "eodhd_configured": bool(settings.eodhd_api_key),
+        "rapidapi_price_fallback_enabled": settings.rapidapi_price_fallback_enabled,
+        "alphavantage_news_fallback_enabled": settings.alphavantage_news_fallback_enabled,
+        "gpw_price_crosscheck_tolerance_pct": settings.gpw_price_crosscheck_tolerance_pct,
         "alpha_vantage_configured": bool(settings.alphavantage_api_key),
         "finnhub_configured": bool(settings.finnhub_api_key),
         "auto_sync_enabled": settings.auto_sync_enabled,

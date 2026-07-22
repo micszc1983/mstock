@@ -16,7 +16,7 @@ Pola w assets.json:
   sector          — sektor (opcjonalne)
   description     — opis (opcjonalne)
   seed_price      — cena startowa do generowania fikcyjnych danych
-  price_symbol    — symbol do Alpha Vantage (np. "AAPL"); null = brak
+  price_symbol    — symbol Yahoo (np. "AAPL", "KGH.WA"); null = brak
   news_symbol     — symbol do Finnhub company-news; null = użyj news_term
   news_term       — słowo kluczowe do Alpha Vantage news search
   metal_price_fn  — funkcja Alpha Vantage do metali (np. "GOLD"); null = brak
@@ -41,7 +41,7 @@ class AssetDefinition:
     sector: Optional[str]
     description: Optional[str]
     seed_price: float
-    price_symbol: Optional[str]      # Alpha Vantage stock symbol
+    price_symbol: Optional[str]      # Yahoo/provider fallback symbol
     news_symbol: Optional[str]       # Finnhub symbol
     news_term: str                   # Alpha Vantage news keyword
     metal_price_fn: Optional[str]    # Alpha Vantage metal function

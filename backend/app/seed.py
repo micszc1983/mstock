@@ -40,17 +40,18 @@ def seed_database(db: Session) -> None:
                 metal_price_fn=a.metal_price_fn,
             ))
         else:
-            # Backfill currency + provider config dla istniejących aktywów
-            if getattr(asset, "currency", None) != a.currency:
-                asset.currency = a.currency
-            if not asset.price_symbol and a.price_symbol:
-                asset.price_symbol = a.price_symbol
-            if not asset.news_symbol and a.news_symbol:
-                asset.news_symbol = a.news_symbol
-            if not asset.news_term and a.news_term:
-                asset.news_term = a.news_term
-            if not asset.metal_price_fn and a.metal_price_fn:
-                asset.metal_price_fn = a.metal_price_fn
+            # assets.json jest źródłem prawdy dla wbudowanego rejestru. Dzięki
+            # pełnemu upsertowi korekty tickerów trafiają również do istniejącej DB.
+            asset.symbol = a.symbol
+            asset.name = a.name
+            asset.type = a.type
+            asset.currency = a.currency
+            asset.sector = a.sector
+            asset.description = a.description
+            asset.price_symbol = a.price_symbol
+            asset.news_symbol = a.news_symbol
+            asset.news_term = a.news_term
+            asset.metal_price_fn = a.metal_price_fn
     db.commit()
 
     # Produkcja nigdy nie dostaje syntetycznych notowań. Testy potrzebują jednak

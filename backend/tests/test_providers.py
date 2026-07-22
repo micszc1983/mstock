@@ -127,3 +127,40 @@ def test_missing_api_key_raises(monkeypatch):
     monkeypatch.setattr(providers.settings, "alphavantage_api_key", "")
     with pytest.raises(HTTPException):
         providers.fetch_stock_prices_from_alpha_vantage("NVDA")
+
+
+def test_eodhd_symbol_maps_gpw_suffixes():
+    assert providers.eodhd_symbol("GPP") == "GPP.WAR"
+    assert providers.eodhd_symbol("gpp.wa") == "GPP.WAR"
+    assert providers.eodhd_symbol("GPP.WAR") == "GPP.WAR"
+
+
+def test_fetch_gpw_prices_from_eodhd(monkeypatch):
+    payload = [
+        {
+            "date": "2026-07-21",
+            "open": 47.8,
+            "high": 49.1,
+            "low": 47.5,
+            "close": 48.9,
+            "adjusted_close": 48.9,
+            "volume": 12345,
+        }
+    ]
+    requested = {}
+
+    class EodhdClient(DummyClient):
+        def get(self, url, params=None):
+            requested["url"] = url
+            requested["params"] = params
+            return DummyResponse(self.payload)
+
+    monkeypatch.setattr(providers.settings, "eodhd_api_key", "secret-token")
+    monkeypatch.setattr(providers.httpx, "Client", lambda **kwargs: EodhdClient(payload))
+
+    rows = providers.fetch_gpw_prices_from_eodhd("GPP.WA")
+
+    assert len(rows) == 1
+    assert rows[0].close == 48.9
+    assert requested["url"].endswith("/eod/GPP.WAR")
+    assert requested["params"]["api_token"] == "secret-token"

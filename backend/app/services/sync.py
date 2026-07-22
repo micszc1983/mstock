@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from statistics import median
+
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
@@ -13,11 +15,12 @@ from app.schemas.sync import SyncResponse
 from app.services.providers import (
     fetch_gpw_news_from_rss,
     fetch_commodity_news_from_rss,
+    fetch_gpw_prices_from_eodhd,
     fetch_news_from_newsapi,
     fetch_stock_prices_from_massive,
     fetch_stock_prices_from_rapidapi,
     fetch_gpw_prices_from_rapidapi,
-    fetch_gpw_prices_from_stooq,
+    fetch_prices_from_yahoo,
     fetch_stock_prices_from_twelvedata,
     fetch_company_news_from_finnhub,
     fetch_company_news_from_finnhub_range,
@@ -27,7 +30,52 @@ from app.services.providers import (
     fetch_stock_prices_from_alpha_vantage,
     fetch_quote_from_finnhub,
 )
+from app.utils.sanitization import redact_sensitive_text
 
+
+def _provider_secrets() -> tuple[str, ...]:
+    return tuple(
+        value for value in (
+            settings.eodhd_api_key,
+            settings.alphavantage_api_key,
+            settings.finnhub_api_key,
+            settings.newsapi_api_key,
+            settings.massive_api_key,
+            settings.twelvedata_api_key,
+            settings.rapidapi_api_key,
+        ) if value
+    )
+
+
+def _safe_provider_error(error: object) -> str:
+    detail = getattr(error, "detail", error)
+    return redact_sensitive_text(detail, _provider_secrets())
+
+
+def _crosscheck_closes(primary: list, secondary: list, tolerance_pct: float) -> tuple[bool, str]:
+    """Porównuje medianę close z maksymalnie 10 ostatnich wspólnych sesji."""
+    primary_by_day = {point.timestamp.date(): float(point.close) for point in primary}
+    secondary_by_day = {point.timestamp.date(): float(point.close) for point in secondary}
+    common_days = sorted(primary_by_day.keys() & secondary_by_day.keys())[-10:]
+    if not common_days:
+        return True, "crosscheck=brak wspólnych sesji"
+    deviations = [
+        abs(primary_by_day[day] / secondary_by_day[day] - 1.0) * 100.0
+        for day in common_days
+        if secondary_by_day[day] > 0
+    ]
+    if not deviations:
+        return True, "crosscheck=brak porównywalnych cen"
+    median_deviation = median(deviations)
+    accepted = median_deviation <= max(0.0, tolerance_pct)
+    return accepted, (
+        f"crosscheck_median_deviation={median_deviation:.3f}%"
+        f"/{len(deviations)} sesji; tolerance={tolerance_pct:.3f}%"
+    )
+
+
+def _is_gpw_asset(asset: AssetORM, symbol: str) -> bool:
+    return (asset.currency or "").upper() == "PLN" or symbol.upper().endswith((".WA", ".WAW", ".WAR"))
 
 
 
@@ -37,6 +85,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
     legacy = settings.asset_provider_config.get(asset.id, {})
     inserted = 0
     skipped = 0
+    sync_detail = ""
 
     if asset.type == AssetType.STOCK.value:
         symbol = asset.price_symbol or legacy.get("price_symbol")
@@ -45,23 +94,53 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
 
         points: list = []
         provider = "unknown"
-        is_gpw = symbol.upper().endswith(".WA")
+        is_gpw = _is_gpw_asset(asset, symbol)
 
-        # ── GPW (.WA): Yahoo Finance → GPW API → RapidAPI Yahoo Finance → Alpha Vantage ──
+        # ── GPW: EODHD → Yahoo → opcjonalne RapidAPI ────────────────────────
         if is_gpw:
-            # 1. Yahoo Finance v8 — darmowy, bez klucza, bez limitu, 5 lat historii
-            try:
-                provider = "yahoo:v8"
-                points = fetch_gpw_prices_from_stooq(symbol)  # alias: używa Yahoo Finance v8
-                if not points:
-                    raise ValueError("Yahoo Finance zwróciło 0 punktów")
-                print(f"[sync] {asset.id}: Yahoo Finance OK — {len(points)} punktów")
-            except Exception as yahoo_err:
-                log_sync_error(db, asset.id, "prices_yahoo_fallback", str(yahoo_err))
-                points = []
+            # 1. EODHD jest źródłem głównym po ustawieniu klucza.
+            if settings.eodhd_api_key and not settings.testing:
+                try:
+                    provider = "eodhd:eod"
+                    points = fetch_gpw_prices_from_eodhd(asset.symbol or symbol)
+                    if not points:
+                        raise ValueError("EODHD zwróciło 0 punktów")
+                    print(f"[sync] {asset.id}: EODHD OK — {len(points)} punktów")
+                except Exception as eodhd_err:
+                    log_sync_error(db, asset.id, "prices_eodhd_fallback", _safe_provider_error(eodhd_err))
+                    points = []
 
-            # 2. GPW API (gpw-api.p.rapidapi.com) — fallback, limit dzienny
-            if not points and settings.rapidapi_api_key and not settings.testing:
+            # Niezależna kontrola EODHD przez Yahoo. Przy systematycznej
+            # rozbieżności wybieramy Yahoo, zamiast zapisywać niepewne ceny.
+            if points and provider == "eodhd:eod":
+                try:
+                    yahoo_points = fetch_prices_from_yahoo(symbol)
+                    accepted, sync_detail = _crosscheck_closes(
+                        points, yahoo_points, settings.gpw_price_crosscheck_tolerance_pct
+                    )
+                    if not accepted:
+                        points = yahoo_points
+                        provider = "yahoo:v8:crosscheck-fallback"
+                        sync_detail += "; EODHD odrzucone"
+                except Exception as crosscheck_err:
+                    sync_detail = f"crosscheck_unavailable={_safe_provider_error(crosscheck_err)}"
+
+            # 2. Yahoo — bezpłatny fallback i źródło domyślne bez klucza EODHD.
+            if not points:
+                try:
+                    provider = "yahoo:v8"
+                    points = fetch_prices_from_yahoo(symbol)
+                    if not points:
+                        raise ValueError("Yahoo Finance zwróciło 0 punktów")
+                    print(f"[sync] {asset.id}: Yahoo Finance OK — {len(points)} punktów")
+                except Exception as yahoo_err:
+                    log_sync_error(db, asset.id, "prices_yahoo_fallback", _safe_provider_error(yahoo_err))
+                    points = []
+
+            # 3. RapidAPI jest jawnie włączanym fallbackiem. Domyślnie pozostaje
+            # wyłączone, aby nie powtarzać 403/429 po wyczerpaniu subskrypcji.
+            rapidapi_enabled = settings.rapidapi_price_fallback_enabled and settings.rapidapi_api_key
+            if not points and rapidapi_enabled and not settings.testing:
                 try:
                     provider = "rapidapi:gpw-api"
                     points = fetch_gpw_prices_from_rapidapi(symbol)
@@ -69,11 +148,10 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                         raise ValueError("GPW API zwróciło 0 punktów")
                     print(f"[sync] {asset.id}: GPW API OK — {len(points)} punktów")
                 except Exception as gpw_err:
-                    log_sync_error(db, asset.id, "prices_gpw_api_fallback", str(gpw_err))
+                    log_sync_error(db, asset.id, "prices_gpw_api_fallback", _safe_provider_error(gpw_err))
                     points = []
 
-            # 3. RapidAPI Yahoo Finance — fallback (wymaga subskrypcji yahoo-finance15)
-            if not points and settings.rapidapi_api_key and not settings.testing:
+            if not points and rapidapi_enabled and not settings.testing:
                 try:
                     provider = "rapidapi:yahoo-finance"
                     points = fetch_stock_prices_from_rapidapi(symbol)
@@ -81,19 +159,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                         raise ValueError("RapidAPI zwróciło 0 punktów")
                     print(f"[sync] {asset.id}: RapidAPI Yahoo Finance OK — {len(points)} punktów")
                 except Exception as rapi_err:
-                    log_sync_error(db, asset.id, "prices_rapidapi_fallback", str(rapi_err))
-                    points = []
-
-            # 4. Alpha Vantage — fallback dla GPW
-            if not points:
-                try:
-                    provider = "alphavantage:TIME_SERIES_DAILY"
-                    points = fetch_stock_prices_from_alpha_vantage(symbol)
-                    if not points:
-                        raise ValueError("Alpha Vantage zwróciło 0 punktów")
-                    print(f"[sync] {asset.id}: Alpha Vantage OK — {len(points)} punktów")
-                except Exception as av_err:
-                    log_sync_error(db, asset.id, "prices_av_fallback", str(av_err))
+                    log_sync_error(db, asset.id, "prices_rapidapi_fallback", _safe_provider_error(rapi_err))
                     points = []
 
         # ── US stocks: Massive → Twelvedata → RapidAPI → AV → Finnhub ─
@@ -123,7 +189,12 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     points = []
 
             # 3. RapidAPI Yahoo Finance — obsługuje US stocks też
-            if not points and settings.rapidapi_api_key and not settings.testing:
+            if (
+                not points
+                and settings.rapidapi_price_fallback_enabled
+                and settings.rapidapi_api_key
+                and not settings.testing
+            ):
                 try:
                     provider = "rapidapi:yahoo-finance"
                     points = fetch_stock_prices_from_rapidapi(asset.symbol or symbol)
@@ -169,7 +240,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
             # Yahoo Finance — ten sam provider co GPW, działa dla futures i spot
             try:
                 provider = "yahoo:v8"
-                points = fetch_gpw_prices_from_stooq(price_sym)
+                points = fetch_prices_from_yahoo(price_sym)
                 if not points:
                     raise ValueError("Yahoo Finance zwróciło 0 punktów")
                 print(f"[sync] {asset.id}: Yahoo Finance OK — {len(points)} punktów")
@@ -197,8 +268,10 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         else:
             skipped += 1
     db.commit()
-    return SyncResponse(asset_id=asset.id, provider=provider, inserted=inserted, skipped=skipped,
-                        detail=f"Price sync completed; rejected_invalid={rejected}")
+    detail = f"Price sync completed; rejected_invalid={rejected}"
+    if sync_detail:
+        detail += f"; {sync_detail}"
+    return SyncResponse(asset_id=asset.id, provider=provider, inserted=inserted, skipped=skipped, detail=detail)
 
 
 def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
@@ -243,7 +316,7 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
             from app.services.providers import fetch_search_news_from_finnhub
             items = fetch_search_news_from_finnhub(term, asset.id, asset_type)
         # 4. Alpha Vantage — ostatni fallback
-        if not items:
+        if not items and (settings.alphavantage_news_fallback_enabled or settings.testing):
             provider = "alphavantage:NEWS_SENTIMENT"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
@@ -257,7 +330,7 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
             items += [i for i in newsapi_items if i.id not in existing_ids]
             if newsapi_items:
                 provider = "rss:commodity+newsapi"
-        if not items:
+        if not items and (settings.alphavantage_news_fallback_enabled or settings.testing):
             provider = "alphavantage:NEWS_SENTIMENT"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
@@ -267,7 +340,7 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         if settings.newsapi_api_key:
             provider = "newsapi"
             items = fetch_news_from_newsapi(term, asset.id, asset_type)
-        if not items:
+        if not items and (settings.alphavantage_news_fallback_enabled or settings.testing):
             provider = "alphavantage:NEWS_SENTIMENT"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
@@ -286,7 +359,7 @@ def log_sync_success(db: Session, asset_id: str, sync_type: str, result: SyncRes
 
 
 def log_sync_error(db: Session, asset_id: str, sync_type: str, detail: str) -> None:
-    add_sync_log(db, asset_id, sync_type, "manual", 0, 0, "error", detail)
+    add_sync_log(db, asset_id, sync_type, "manual", 0, 0, "error", _safe_provider_error(detail))
     db.commit()
 
 

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.schemas.asset import PricePoint
 from app.schemas.common import AssetType, NarrativeLabel
 from app.schemas.news import NewsItem
+from app.utils.sanitization import redact_sensitive_text
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -19,6 +20,12 @@ def clamp(value: float, low: float, high: float) -> float:
 def require_api_key(api_key: str, env_name: str) -> None:
     if not api_key:
         raise HTTPException(status_code=400, detail=f"Missing {env_name}. Set it in environment variables.")
+
+
+def eodhd_symbol(symbol: str) -> str:
+    """Mapuje ticker kanoniczny/Yahoo na format EODHD dla GPW."""
+    base = symbol.upper().removesuffix(".WA").removesuffix(".WAW").removesuffix(".WAR")
+    return f"{base}.WAR"
 
 
 # UWAGA: Kanoniczna implementacja przeniesiona do app/services/nlp_backends/heuristic.py
@@ -162,7 +169,7 @@ def fetch_stock_prices_from_alpha_vantage(symbol: str) -> List[PricePoint]:
     series = payload.get("Time Series (Daily)")
     if not isinstance(series, dict):
         detail = payload.get("Note") or payload.get("Information") or payload.get("Error Message") or "Unexpected Alpha Vantage response"
-        raise HTTPException(status_code=502, detail=f"Alpha Vantage price sync failed: {detail}")
+        raise HTTPException(status_code=502, detail=f"Alpha Vantage price sync failed: {redact_sensitive_text(detail)}")
 
     points: List[PricePoint] = []
     for day, values in sorted(series.items()):
@@ -191,7 +198,7 @@ def fetch_metal_prices_from_alpha_vantage(function_name: str) -> List[PricePoint
     data = payload.get("data")
     if not isinstance(data, list):
         detail = payload.get("Note") or payload.get("Error Message") or "Unexpected Alpha Vantage metal response"
-        raise HTTPException(status_code=502, detail=f"Alpha Vantage metal sync failed: {detail}")
+        raise HTTPException(status_code=502, detail=f"Alpha Vantage metal sync failed: {redact_sensitive_text(detail)}")
 
     points: List[PricePoint] = []
     for row in sorted(data, key=lambda item: item.get("date", "")):
@@ -252,7 +259,7 @@ def fetch_search_news_from_alpha_vantage(term: str, asset_id: str, asset_type: A
     feed = payload.get("feed")
     if not isinstance(feed, list):
         detail = payload.get("Note") or payload.get("Error Message") or "Unexpected Alpha Vantage news response"
-        raise HTTPException(status_code=502, detail=f"Alpha Vantage news sync failed: {detail}")
+        raise HTTPException(status_code=502, detail=f"Alpha Vantage news sync failed: {redact_sensitive_text(detail)}")
 
     items: List[NewsItem] = []
     for entry in feed[:50]:
@@ -377,6 +384,64 @@ def fetch_search_news_from_alpha_vantage_range(
         except Exception:
             continue
     return items
+
+
+# ══════════════════════════════════════════════════════════════════
+#  EODHD — główne źródło dziennych OHLCV dla GPW
+#  Dokumentacja: https://eodhd.com/financial-apis/api-for-historical-data-and-volumes
+# ══════════════════════════════════════════════════════════════════
+
+_EODHD_BASE = "https://eodhd.com/api"
+
+
+def fetch_gpw_prices_from_eodhd(symbol: str) -> List[PricePoint]:
+    """Pobiera do 5 lat surowych dziennych OHLCV w formacie CODE.WAR."""
+    require_api_key(settings.eodhd_api_key, "EODHD_API_KEY")
+    provider_symbol = eodhd_symbol(symbol)
+    today = datetime.now(timezone.utc).date()
+    date_from = (today - timedelta(days=366 * 5)).isoformat()
+    params = {
+        "api_token": settings.eodhd_api_key,
+        "fmt": "json",
+        "period": "d",
+        "order": "a",
+        "from": date_from,
+        "to": today.isoformat(),
+    }
+
+    with httpx.Client(timeout=settings.sync_timeout_seconds, follow_redirects=True) as client:
+        response = client.get(f"{_EODHD_BASE}/eod/{provider_symbol}", params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    if isinstance(payload, dict):
+        message = payload.get("message") or payload.get("error") or payload.get("errors")
+        if message:
+            raise HTTPException(status_code=502, detail=f"EODHD: {message}")
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=502, detail=f"EODHD: nieoczekiwana odpowiedź dla {provider_symbol}")
+
+    points: List[PricePoint] = []
+    for bar in payload:
+        if not isinstance(bar, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(bar["date"])[:10]).replace(tzinfo=timezone.utc)
+            points.append(PricePoint(
+                timestamp=ts,
+                open=float(bar["open"]),
+                high=float(bar["high"]),
+                low=float(bar["low"]),
+                close=float(bar["close"]),
+                volume=float(bar.get("volume") or 0),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not points:
+        raise HTTPException(status_code=502, detail=f"EODHD: brak danych dla {provider_symbol}")
+    points.sort(key=lambda point: point.timestamp)
+    return points
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -714,11 +779,10 @@ def fetch_gpw_prices_from_rapidapi(ticker: str) -> List[PricePoint]:
 #  Brak limitu dziennego, ~2 lata historii
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_gpw_prices_from_stooq(ticker: str) -> List[PricePoint]:
+def fetch_prices_from_yahoo(ticker: str) -> List[PricePoint]:
     """
     Pobiera historię cen z Yahoo Finance v8 API (bez klucza API).
     ticker: symbol GPW z .WA, np. "PKN.WA", "KGH.WA"
-    Nazwa zachowana dla kompatybilności z sync.py.
     """
     symbol = ticker.upper()
     # Dodaj .WA tylko dla GPW — nie dla futures (GC=F), innych giełd (.AS, .L itp.) ani ETF
@@ -769,6 +833,11 @@ def fetch_gpw_prices_from_stooq(ticker: str) -> List[PricePoint]:
 
     points.sort(key=lambda p: p.timestamp)
     return points
+
+
+# Alias pozostawiony dla kompatybilności integracji importujących starą,
+# mylącą nazwę. Implementacja zawsze korzystała z Yahoo, nie ze Stooq.
+fetch_gpw_prices_from_stooq = fetch_prices_from_yahoo
 
 
 # ══════════════════════════════════════════════════════════════════

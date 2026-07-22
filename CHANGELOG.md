@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.1 — 2026-07-22
+
+### Dane GPW
+
+- EODHD jako opcjonalne źródło główne z automatycznym mapowaniem `CODE.WAR`,
+- Yahoo Finance jako bezpłatny fallback i niezależna kontrola zgodności cen,
+- odrzucanie źródła głównego przy systematycznej rozbieżności ponad konfigurowany próg,
+- poprawiony ticker Grupy Pracuj: wewnętrzne ID `prc`, ticker `GPP`, Yahoo `GPP.WA`,
+- pełny upsert metadanych wbudowanych aktywów przy starcie,
+- domyślnie wyłączone fallbacki RapidAPI, aby nie powtarzać błędów 403/429,
+- domyślnie wyłączony limitowany fallback newsów Alpha Vantage po pustym RSS,
+- maskowanie kluczy API również w historycznych logach synchronizacji.
+
 ## 1.0.0 — 2026-07-22
 
 Pierwsze stabilne wydanie MStock do prywatnego użycia w sieci LAN.

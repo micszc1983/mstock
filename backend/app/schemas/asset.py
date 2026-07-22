@@ -31,7 +31,7 @@ class AssetCreate(BaseModel):
     sector: Optional[str] = None
     description: Optional[str] = None
     # Konfiguracja providera
-    price_symbol: Optional[str] = None      # symbol w Alpha Vantage, np. "AMZN"
+    price_symbol: Optional[str] = None      # symbol cenowy Yahoo/fallback, np. "AMZN", "KGH.WA"
     news_symbol: Optional[str] = None       # symbol w Finnhub (akcje), np. "AMZN"
     news_term: Optional[str] = None         # termin do wyszukiwania newsów, np. "Amazon"
     metal_price_fn: Optional[str] = None    # funkcja Alpha Vantage dla metali, np. "GOLD"

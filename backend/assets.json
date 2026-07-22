@@ -477,16 +477,16 @@
   },
   {
     "id": "prc",
-    "symbol": "PRC",
-    "name": "Pracuj.pl",
+    "symbol": "GPP",
+    "name": "Grupa Pracuj",
     "type": "stock",
     "currency": "PLN",
     "sector": "HR / Recruitment",
     "description": null,
     "seed_price": 55,
-    "price_symbol": "PRC.WA",
+    "price_symbol": "GPP.WA",
     "news_symbol": null,
-    "news_term": "Pracuj.pl rekrutacja",
+    "news_term": "Grupa Pracuj",
     "metal_price_fn": null
   },
   {

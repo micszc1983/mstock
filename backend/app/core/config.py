@@ -8,14 +8,18 @@ try:
 
     class Settings(BaseSettings):
         app_name: str = "MStock"
-        app_version: str = "1.0.0"
+        app_version: str = "1.0.1"
         database_url: str = "sqlite:///./mstock.db"
         alphavantage_api_key: str = ""
         finnhub_api_key: str = ""
         newsapi_api_key: str = ""
         massive_api_key: str = ""
         twelvedata_api_key: str = ""
+        eodhd_api_key: str = ""
         rapidapi_api_key: str = ""
+        rapidapi_price_fallback_enabled: bool = False
+        alphavantage_news_fallback_enabled: bool = False
+        gpw_price_crosscheck_tolerance_pct: float = 2.0
         anthropic_api_key: str = ""
         admin_api_key: str = ""
         sync_timeout_seconds: float = 20.0
@@ -97,14 +101,18 @@ except ImportError:
     @dataclass(slots=True)
     class Settings:  # type: ignore[no-redef]
         app_name: str = "MStock"
-        app_version: str = "1.0.0"
+        app_version: str = "1.0.1"
         database_url: str = os.getenv("DATABASE_URL", "sqlite:///./mstock.db")
         alphavantage_api_key: str = os.getenv("ALPHAVANTAGE_API_KEY", "")
         finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")
         newsapi_api_key: str = os.getenv("NEWSAPI_API_KEY", "")
         massive_api_key: str = os.getenv("MASSIVE_API_KEY", "")
         twelvedata_api_key: str = os.getenv("TWELVEDATA_API_KEY", "")
+        eodhd_api_key: str = os.getenv("EODHD_API_KEY", "")
         rapidapi_api_key: str = os.getenv("RAPIDAPI_API_KEY", "")
+        rapidapi_price_fallback_enabled: bool = os.getenv("RAPIDAPI_PRICE_FALLBACK_ENABLED", "false").lower() == "true"
+        alphavantage_news_fallback_enabled: bool = os.getenv("ALPHAVANTAGE_NEWS_FALLBACK_ENABLED", "false").lower() == "true"
+        gpw_price_crosscheck_tolerance_pct: float = float(os.getenv("GPW_PRICE_CROSSCHECK_TOLERANCE_PCT", "2.0"))
         anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         admin_api_key: str = os.getenv("ADMIN_API_KEY", "")
         sync_timeout_seconds: float = float(os.getenv("SYNC_TIMEOUT_SECONDS", "20"))

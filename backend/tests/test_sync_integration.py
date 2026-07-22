@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AssetORM, NewsItemORM, PricePointORM, SyncLogORM
 from app.db.session import Base
-from app.repositories.sync_logs import add_sync_log
+from app.repositories.sync_logs import add_sync_log, redact_existing_sync_log_secrets
 from app.schemas.asset import PricePoint
 from app.schemas.common import AssetType, NarrativeLabel
 from app.schemas.news import NewsItem
@@ -260,3 +260,122 @@ def test_log_sync_success_persists_sync_log(tmp_path, monkeypatch):
         assert logs[0].sync_type == "prices"
         assert logs[0].status == "success"
         assert logs[0].inserted == 1
+
+
+def test_gpw_sync_prefers_eodhd_and_crosschecks_yahoo(tmp_path, monkeypatch):
+    TestingSessionLocal = build_test_session(tmp_path)
+    from app.services import sync as sync_service
+
+    point = PricePoint(
+        timestamp=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        open=48.0, high=49.0, low=47.5, close=48.8, volume=10000.0,
+    )
+    calls = []
+
+    monkeypatch.setattr(sync_service.settings, "testing", False)
+    monkeypatch.setattr(sync_service.settings, "eodhd_api_key", "test-eodhd-key")
+    monkeypatch.setattr(sync_service, "fetch_gpw_prices_from_eodhd", lambda symbol: calls.append(("eodhd", symbol)) or [point])
+    monkeypatch.setattr(sync_service, "fetch_prices_from_yahoo", lambda symbol: calls.append(("yahoo", symbol)) or [point])
+
+    with TestingSessionLocal() as db:
+        db.add(AssetORM(
+            id="prc", symbol="GPP", name="Grupa Pracuj", type="stock",
+            currency="PLN", price_symbol="GPP.WA",
+        ))
+        db.commit()
+        result = sync_prices_for_asset(db, db.get(AssetORM, "prc"))
+
+        assert result.provider == "eodhd:eod"
+        assert result.inserted == 1
+        assert calls == [("eodhd", "GPP"), ("yahoo", "GPP.WA")]
+        assert "crosscheck_median_deviation=0.000%" in result.detail
+
+
+def test_crosscheck_rejects_systematically_divergent_primary():
+    from app.services.sync import _crosscheck_closes
+
+    primary = [PricePoint(
+        timestamp=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        open=100, high=101, low=99, close=100, volume=10,
+    )]
+    secondary = [PricePoint(
+        timestamp=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        open=90, high=91, low=89, close=90, volume=10,
+    )]
+
+    accepted, detail = _crosscheck_closes(primary, secondary, tolerance_pct=2.0)
+    assert accepted is False
+    assert "11.111%" in detail
+
+
+def test_sync_log_redacts_provider_secrets(tmp_path):
+    TestingSessionLocal = build_test_session(tmp_path)
+    with TestingSessionLocal() as db:
+        add_sync_log(
+            db, "prc", "prices", "manual", 0, 0, "error",
+            "limit exceeded for api_token=very-secret-token&fmt=json; API key as ANOTHERSECRET",
+        )
+        db.commit()
+        row = db.scalar(select(SyncLogORM))
+        assert "very-secret-token" not in row.detail
+        assert "ANOTHERSECRET" not in row.detail
+        assert row.detail.count("***") == 2
+
+
+def test_existing_sync_logs_are_redacted_with_configured_secret(tmp_path):
+    TestingSessionLocal = build_test_session(tmp_path)
+    with TestingSessionLocal() as db:
+        row = SyncLogORM(
+            asset_id="prc", sync_type="prices", provider="manual",
+            inserted=0, skipped=0, status="error",
+            detail="provider returned embedded-secret-value without a label",
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+        db.commit()
+
+        changed = redact_existing_sync_log_secrets(db, ("embedded-secret-value",))
+        db.commit()
+        assert changed == 1
+        assert db.get(SyncLogORM, row.id).detail == "provider returned *** without a label"
+
+
+def test_gpw_news_does_not_burn_alpha_vantage_limit_after_empty_rss(tmp_path, monkeypatch):
+    TestingSessionLocal = build_test_session(tmp_path)
+    from app.services import sync as sync_service
+
+    monkeypatch.setattr(sync_service.settings, "testing", False)
+    monkeypatch.setattr(sync_service.settings, "alphavantage_news_fallback_enabled", False)
+    monkeypatch.setattr(sync_service.settings, "finnhub_api_key", "")
+    monkeypatch.setattr(sync_service.settings, "newsapi_api_key", "")
+    monkeypatch.setattr(sync_service, "fetch_gpw_news_from_rss", lambda *args: [])
+    monkeypatch.setattr(sync_service, "fetch_news_from_newsapi", lambda *args: [])
+    monkeypatch.setattr(
+        sync_service, "fetch_search_news_from_alpha_vantage",
+        lambda *args: (_ for _ in ()).throw(AssertionError("Alpha Vantage nie powinno zostać wywołane")),
+    )
+
+    with TestingSessionLocal() as db:
+        db.add(AssetORM(
+            id="prc", symbol="GPP", name="Grupa Pracuj", type="stock",
+            currency="PLN", price_symbol="GPP.WA", news_term="Grupa Pracuj",
+        ))
+        db.commit()
+        result = sync_news_for_asset(db, db.get(AssetORM, "prc"))
+        assert result.provider == "rss:gpw"
+        assert result.inserted == 0
+
+
+def test_data_quality_ignores_diagnostic_fallback_errors(tmp_path):
+    from app.services.data_quality import _analyze_sync
+
+    TestingSessionLocal = build_test_session(tmp_path)
+    with TestingSessionLocal() as db:
+        add_sync_log(db, "prc", "prices_eodhd_fallback", "manual", 0, 0, "error", "temporary failure")
+        add_sync_log(db, "prc", "prices", "yahoo:v8", 100, 0, "success", "completed")
+        db.commit()
+
+        quality = _analyze_sync(db, "prc")
+        assert quality.total_syncs_7d == 1
+        assert quality.errors_7d == 0
+        assert quality.error_rate_7d == 0.0
