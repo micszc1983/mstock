@@ -187,9 +187,8 @@ app = FastAPI(
 
 @app.middleware("http")
 async def protect_administrative_operations(request: Request, call_next):
-    """Chroni operacje administracyjne; lokalny proces pozostaje używalny bez klucza."""
-    protected = (request.url.path.startswith("/admin") or request.url.path.startswith("/ml/")
-                 or request.url.path.startswith("/paper/"))
+    """Chroni administrację i ML; paper trading nie wykonuje operacji zewnętrznych."""
+    protected = request.url.path.startswith("/admin") or request.url.path.startswith("/ml/")
     if protected and request.method not in {"GET", "HEAD", "OPTIONS"}:
         import secrets
         client_host = request.client.host if request.client else ""

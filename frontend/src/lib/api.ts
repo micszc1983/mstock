@@ -515,6 +515,11 @@ export const api = {
   paperAccount: (accountId: number) =>
     fetchJson<PaperAccount>(`${_activeBase}/paper/accounts/${accountId}`),
 
+  paperAccounts: (currency?: string) =>
+    fetchJson<PaperAccount[]>(
+      `${_activeBase}/paper/accounts${currency ? `?currency=${encodeURIComponent(currency)}` : ""}`,
+    ),
+
   placePaperOrder: (
     accountId: number,
     assetId: string,
@@ -528,6 +533,18 @@ export const api = {
 
   paperJournal: (accountId: number, limit = 200) =>
     fetchJson<PaperJournal>(`${_activeBase}/paper/accounts/${accountId}/journal?limit=${limit}`),
+
+  allocatePaperRecommendations: (accountId: number, amounts: number[]) =>
+    postJson<import("./types").PaperAllocationResponse>(
+      `${_activeBase}/paper/accounts/${accountId}/recommended-allocations`,
+      { amounts },
+    ),
+
+  setPaperStrategyActive: (accountId: number, active: boolean) =>
+    postJson<import("./types").PaperStrategy>(
+      `${_activeBase}/paper/accounts/${accountId}/strategy/status`,
+      { active },
+    ),
 
   intradaySync: (assetId: string, resolution = "15") =>
     postJson<{ asset_id: string; resolution: string; new_candles: number; fetched_from_api: number; already_in_db: number }>(

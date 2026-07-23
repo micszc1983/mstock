@@ -588,6 +588,39 @@ class PaperAccountORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class PaperStrategyORM(Base):
+    """Persistent automatic recommendation strategy attached to a paper account."""
+
+    __tablename__ = "paper_strategies"
+    __table_args__ = (UniqueConstraint("account_id", name="uq_paper_strategy_account"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("paper_accounts.id"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_message: Mapped[str] = mapped_column(Text, default="")
+
+
+class PaperStrategyBucketORM(Base):
+    """One user-provided capital bucket managed independently by the strategy."""
+
+    __tablename__ = "paper_strategy_buckets"
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "ordinal", name="uq_paper_strategy_bucket_ordinal"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_id: Mapped[int] = mapped_column(ForeignKey("paper_strategies.id"), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    initial_amount: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    asset_id: Mapped[Optional[str]] = mapped_column(ForeignKey("assets.id"), nullable=True, index=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_price: Mapped[float] = mapped_column(Float, default=0.0)
+    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class PaperPositionORM(Base):
     __tablename__ = "paper_positions"
     __table_args__ = (UniqueConstraint("account_id", "asset_id", name="uq_paper_position"),)

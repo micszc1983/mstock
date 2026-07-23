@@ -4,11 +4,24 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import AssetORM, PaperOrderORM, PaperTradeORM, PricePointORM
+from app.db.models import (
+    AssetORM,
+    PaperOrderORM,
+    PaperStrategyBucketORM,
+    PaperStrategyORM,
+    PaperTradeORM,
+    PricePointORM,
+)
 from app.db.session import Base
 from app.services.intraday_backtest_service import _portfolio_metrics
 from app.services.ohlcv_validation import validate_series
-from app.services.paper_trading import account_snapshot, get_or_create_account, place_market_order
+from app.services.paper_trading import (
+    account_snapshot,
+    allocate_recommended_amounts,
+    get_or_create_account,
+    place_market_order,
+    run_active_paper_strategies,
+)
 
 
 def test_ohlcv_validator_blocks_impossible_bar():
@@ -49,3 +62,147 @@ def test_paper_trading_persists_order_trade_and_position(tmp_path):
         assert sell.status == "filled"
         assert db.scalar(select(func.count()).select_from(PaperOrderORM)) == 2
         assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 2
+
+
+def test_paper_trading_allocates_cash_buckets_to_distinct_buy_recommendations(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'allocation.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for asset_id, confidence, edge in (
+            ("first", 82.0, 2.1),
+            ("second", 77.0, 3.0),
+            ("third", 70.0, 1.8),
+        ):
+            db.add(AssetORM(id=asset_id, symbol=asset_id.upper(), name=asset_id.title(), type="stock", currency="USD"))
+            for i in range(30):
+                db.add(PricePointORM(
+                    asset_id=asset_id,
+                    timestamp=start + timedelta(days=i),
+                    open=100 + i,
+                    high=101 + i,
+                    low=99 + i,
+                    close=100 + i,
+                    volume=1000,
+                ))
+        db.commit()
+
+        def recommendation(asset_id, confidence, edge):
+            return SimpleNamespace(
+                asset_id=asset_id,
+                symbol=asset_id.upper(),
+                name=asset_id.title(),
+                recommendation="KUP",
+                data_complete=True,
+                has_critical_alert=False,
+                expected_net_edge_pct=edge,
+                uncertainty_pct=0.4,
+                composite_score=75.0,
+                confidence=confidence,
+                transaction_cost_pct=0.2,
+                market_segment="USA",
+                regime="bull",
+            )
+
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: [
+                recommendation("third", 70.0, 1.8),
+                recommendation("first", 82.0, 2.1),
+                recommendation("second", 77.0, 3.0),
+            ],
+        )
+        account = get_or_create_account(db, name="allocation", initial_cash=10_000, currency="USD")
+        db.commit()
+
+        result = allocate_recommended_amounts(db, account.id, [1000, 2000, 3000])
+
+        assert [row["asset_id"] for row in result["allocations"]] == ["first", "second", "third"]
+        assert [row["amount"] for row in result["allocations"]] == [1000, 2000, 3000]
+        assert not result["unallocated"]
+        assert len({row["asset_id"] for row in result["allocations"]}) == 3
+        assert result["account"]["cash"] == 4000.0
+        assert db.scalar(select(func.count()).select_from(PaperOrderORM)) == 3
+        assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 3
+
+
+def test_paper_trading_leaves_bucket_in_cash_when_no_additional_buy_exists(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'no_force.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(AssetORM(id="only", symbol="ONLY", name="Only", type="stock", currency="USD"))
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(30):
+            db.add(PricePointORM(asset_id="only", timestamp=start + timedelta(days=i),
+                open=100+i, high=101+i, low=99+i, close=100+i, volume=1000))
+        db.commit()
+        rec = SimpleNamespace(
+            asset_id="only", symbol="ONLY", name="Only", recommendation="KUP",
+            data_complete=True, has_critical_alert=False, expected_net_edge_pct=2.0,
+            uncertainty_pct=0.5, composite_score=70.0, confidence=75.0,
+            transaction_cost_pct=0.2, market_segment="USA", regime="bull",
+        )
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: [rec],
+        )
+        account = get_or_create_account(db, name="no-force", initial_cash=5000, currency="USD")
+        db.commit()
+
+        result = allocate_recommended_amounts(db, account.id, [1000, 2000])
+
+        assert len(result["allocations"]) == 1
+        assert result["unallocated"] == [{
+            "amount": 2000.0,
+            "reason": "Oczekuje na odpowiednie aktywo z rekomendacją KUP",
+        }]
+        assert result["account"]["cash"] == 4000.0
+        assert result["account"]["strategy"]["active"] is True
+        assert [row["status"] for row in result["account"]["strategy"]["buckets"]] == [
+            "position", "waiting",
+        ]
+
+
+def test_background_strategy_sells_and_reinvests_bucket(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'background.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for asset_id in ("old", "new"):
+            db.add(AssetORM(id=asset_id, symbol=asset_id.upper(), name=asset_id.title(), type="stock", currency="USD"))
+            for i in range(30):
+                db.add(PricePointORM(asset_id=asset_id, timestamp=start + timedelta(days=i),
+                    open=100+i, high=101+i, low=99+i, close=100+i, volume=1000))
+        db.commit()
+
+        def rec(asset_id, action, confidence=75.0):
+            return SimpleNamespace(
+                asset_id=asset_id, symbol=asset_id.upper(), name=asset_id.title(),
+                recommendation=action, data_complete=True, has_critical_alert=False,
+                expected_net_edge_pct=2.0 if action == "KUP" else -2.0,
+                uncertainty_pct=0.5, composite_score=70.0, confidence=confidence,
+                transaction_cost_pct=0.2, market_segment="USA", regime="bull",
+            )
+
+        recommendations = [rec("old", "KUP")]
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: recommendations,
+        )
+        account = get_or_create_account(db, name="background", initial_cash=2000, currency="USD")
+        db.commit()
+        first = allocate_recommended_amounts(db, account.id, [1000])
+        assert first["account"]["strategy"]["buckets"][0]["asset_id"] == "old"
+
+        recommendations[:] = [rec("old", "SPRZEDAJ"), rec("new", "KUP", confidence=80.0)]
+        result = run_active_paper_strategies(db)
+
+        assert len(result) == 1
+        assert len(result[0]["sells"]) == 1
+        assert len(result[0]["buys"]) == 1
+        strategy = db.scalar(select(PaperStrategyORM).where(PaperStrategyORM.account_id == account.id))
+        bucket = db.scalar(select(PaperStrategyBucketORM).where(PaperStrategyBucketORM.strategy_id == strategy.id))
+        assert bucket.asset_id == "new"
+        assert bucket.quantity > 0
+        assert db.scalar(select(func.count()).select_from(PaperOrderORM)) == 3
+        assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 3

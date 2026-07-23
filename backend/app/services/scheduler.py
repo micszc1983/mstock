@@ -603,6 +603,19 @@ def run_periodic_sync() -> None:
             # Rekomendacje powstają po monitoringu, więc używają aktualnej
             # automatycznej bramki eligible/shadow/degraded.
             _step_recommendation_journal(db, r)
+            try:
+                from app.services.paper_trading import run_active_paper_strategies
+                paper_results = run_active_paper_strategies(db)
+                if paper_results:
+                    buys = sum(len(item.get("buys", [])) for item in paper_results)
+                    sells = sum(len(item.get("sells", [])) for item in paper_results)
+                    failures = sum("error" in item for item in paper_results)
+                    r.log(
+                        f"Paper trading: strategie={len(paper_results)}, "
+                        f"kupna={buys}, sprzedaże={sells}, błędy={failures}"
+                    )
+            except Exception as exc:
+                r.err("paper_trading", exc)
             _step_ml_retention(db, r)
             _step_anomaly(db, r)
 

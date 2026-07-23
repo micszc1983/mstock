@@ -53,3 +53,20 @@ def test_intraday_signals_summary_is_a_single_bulk_endpoint(test_app):
     assert payload["resolution"] == "15"
     assert "nvda" in payload["signals"]
     assert payload["signals"]["nvda"] in {"BUY", "SELL", None}
+
+
+def test_remote_paper_operations_do_not_require_admin_key(test_app):
+    response = test_app.post(
+        "/paper/accounts",
+        json={"name": "phone-paper", "initial_cash": 16_000, "currency": "USD"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["initial_cash"] == 16_000
+
+
+def test_remote_admin_operations_still_require_admin_key(test_app):
+    response = test_app.post("/admin/run-pipeline")
+
+    assert response.status_code == 503
+    assert "ADMIN_API_KEY" in response.json()["detail"]

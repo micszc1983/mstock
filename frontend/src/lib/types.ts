@@ -963,6 +963,33 @@ export type PaperAccount = {
   total_return_pct: number;
   unrealized_pnl: number;
   positions: PaperPosition[];
+  strategy: PaperStrategy | null;
+};
+
+export type PaperStrategyBucket = {
+  id: number;
+  ordinal: number;
+  initial_amount: number;
+  cash: number;
+  asset_id: string | null;
+  quantity: number;
+  avg_price: number;
+  last_price: number | null;
+  value: number;
+  return_pct: number;
+  status: "waiting" | "position";
+  opened_at: string | null;
+  updated_at: string;
+};
+
+export type PaperStrategy = {
+  id: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_run_at: string | null;
+  last_message: string;
+  buckets: PaperStrategyBucket[];
 };
 
 export type PaperOrder = {
@@ -997,3 +1024,28 @@ export type PaperTrade = {
 };
 
 export type PaperJournal = { orders: PaperOrder[]; trades: PaperTrade[] };
+
+export type PaperAllocation = {
+  amount: number;
+  asset_id: string;
+  symbol: string;
+  name: string;
+  quantity: number;
+  reference_price: number;
+  fill_price: number;
+  invested_amount: number;
+  entry_costs: number;
+  confidence: number;
+  expected_net_edge_pct: number;
+  uncertainty_pct: number;
+  market_segment: string;
+  regime: string;
+  order_id: number;
+};
+
+export type PaperAllocationResponse = {
+  requested_amounts: number[];
+  allocations: PaperAllocation[];
+  unallocated: { amount: number; reason: string }[];
+  account: PaperAccount;
+};
