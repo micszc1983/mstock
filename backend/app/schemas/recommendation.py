@@ -107,6 +107,12 @@ class RecommendationJournalRecord(BaseModel):
     snapshot_at: datetime
     created_at: datetime
     model_version: str
+    revision: int = 1
+    previous_record_id: Optional[int] = None
+    change_type: str = "initial"
+    change_summary: Optional[str] = None
+    change_details_json: str = "{}"
+    signal_snapshot_json: str = "{}"
     market: str
     regime: str
     action: str
@@ -129,6 +135,9 @@ class RecommendationJournalRecord(BaseModel):
     meta_gate_applied: bool
     meta_trade_threshold: Optional[float] = None
     meta_threshold_scope: Optional[str] = None
+    no_trade_reason: Optional[str] = None
+    rationale: Optional[str] = None
+    data_complete: bool = True
     base_price: Optional[float]
     quality_flag: Optional[str]
     realized_return_1d_pct: Optional[float]

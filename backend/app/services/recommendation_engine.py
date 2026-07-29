@@ -17,6 +17,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.repositories.assets import get_asset, list_assets
 from app.repositories.alerts import list_alerts_for_asset
 from app.repositories.decision_support import get_latest_decision_snapshot
@@ -46,6 +47,38 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
 def _norm(value: float, center: float, scale: float) -> float:
     """Normalizuje wartość do [-1, +1] wokół centrum."""
     return max(-1.0, min(1.0, (value - center) / scale))
+
+
+def _forecast_consensus_veto(recommendation: str, *forecasts) -> str | None:
+    """Move a calibrated action to no-trade on strong 1d/5d/20d disagreement."""
+    if len(forecasts) != 3 or any(forecast is None for forecast in forecasts):
+        return None
+    threshold = _clamp(
+        settings.recommendation_forecast_consensus_veto_probability,
+        0.05,
+        0.49,
+    )
+    directions = [(forecast.direction or "").lower() for forecast in forecasts]
+    up_probabilities = [float(forecast.up_probability) for forecast in forecasts]
+    if (
+        recommendation == "KUP"
+        and all(direction == "down" for direction in directions)
+        and all(probability <= threshold for probability in up_probabilities)
+    ):
+        return (
+            "Sygnał KUP został przeniesiony do strefy bez transakcji: "
+            "prognozy 1d, 5d i 20d zgodnie wskazują wyraźną przewagę spadku."
+        )
+    if (
+        recommendation == "SPRZEDAJ"
+        and all(direction == "up" for direction in directions)
+        and all(probability >= 1.0 - threshold for probability in up_probabilities)
+    ):
+        return (
+            "Sygnał SPRZEDAJ został przeniesiony do strefy bez transakcji: "
+            "prognozy 1d, 5d i 20d zgodnie wskazują wyraźną przewagę wzrostu."
+        )
+    return None
 
 
 def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | None:
@@ -247,6 +280,12 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
 
     meta_gate_applied = False
     final_no_trade_reason = calibrated.no_trade_reason
+    confidence_probability = calibrated.confidence_probability
+    forecast_gate_reason = _forecast_consensus_veto(recommendation, f1, f5, f20)
+    if forecast_gate_reason is not None:
+        recommendation = "TRZYMAJ" if held else "BRAK TRANSAKCJI"
+        final_no_trade_reason = forecast_gate_reason
+        confidence_probability = calibrated.probability_no_trade
     if (
         recommendation in {"KUP", "SPRZEDAJ"}
         and ml_meta is not None
@@ -254,13 +293,14 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     ):
         recommendation = "TRZYMAJ" if held else "BRAK TRANSAKCJI"
         meta_gate_applied = True
+        confidence_probability = calibrated.probability_no_trade
         final_no_trade_reason = (
             f"Meta-model ocenia opłacalność wykonania na {ml_meta.probability_up * 100:.1f}% "
             f"przy progu {meta_threshold.threshold * 100:.1f}% ({meta_threshold.scope}) "
             "i kieruje sygnał do strefy bez transakcji."
         )
 
-    confidence = calibrated.confidence_probability * 100
+    confidence = confidence_probability * 100
     if confidence >= 70:
         confidence_label = "wysoka"
     elif confidence >= 55:

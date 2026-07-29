@@ -610,7 +610,12 @@ def train_all_targets(db: Session) -> list:
     """Trenuje champion–challenger dla targetów bezpośrednio używanych w decyzji."""
     results = []
     assets = list_assets(db)
-    targets = ("target_up_5d", "target_triple_barrier", "target_meta_label")
+    targets = (
+        "target_up_5d",
+        "target_up_20d",
+        "target_triple_barrier",
+        "target_meta_label",
+    )
     for asset in assets:
         for target in targets:
             rows = list_training_rows_for_target(db, target, asset_id=asset.id)

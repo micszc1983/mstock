@@ -1161,6 +1161,39 @@ def _fast_price_and_alert_check() -> None:
         _fast_check_lock.release()
 
 
+def _automatic_recommendation_audit_job() -> None:
+    """Daily lightweight check; the expensive walk-forward audit is normally weekly."""
+    if not settings.recommendation_audit_auto_enabled:
+        return
+    if not scheduler_lock.acquire(blocking=False):
+        print("[recommendation-audit] Inny cykl nadal trwa — sprawdzę ponownie następnego dnia.")
+        return
+    try:
+        from app.services.recommendation_audit import run_automatic_audit_if_due
+        with SessionLocal() as db:
+            result = run_automatic_audit_if_due(db)
+            if result.get("ran"):
+                from app.services.paper_trading import run_active_paper_strategies
+                paper_results = run_active_paper_strategies(db)
+                print(
+                    f"[recommendation-audit] Audyt #{result.get('audit_id')} zakończony: "
+                    f"nowe_próbki={result.get('new_outcomes')}, "
+                    f"wiersze={result.get('eligible_rows')}, "
+                    f"strategie_paper={len(paper_results)}"
+                )
+            else:
+                print(
+                    f"[recommendation-audit] Pominięty: {result.get('reason')}, "
+                    f"nowe_próbki={result.get('new_outcomes', 0)}/"
+                    f"{result.get('required_new_outcomes', settings.recommendation_audit_min_new_outcomes)}"
+                )
+    except Exception as exc:
+        print(f"[recommendation-audit] BŁĄD: {exc}")
+        traceback.print_exc()
+    finally:
+        scheduler_lock.release()
+
+
 def start_scheduler() -> None:
     if not settings.auto_sync_enabled:
         print("[scheduler] Wyłączony (AUTO_SYNC_ENABLED=false)")
@@ -1199,6 +1232,21 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     print("[scheduler] Intraday sync co 15 min (podczas sesji WSE/NYSE)")
+    scheduler.add_job(
+        _automatic_recommendation_audit_job,
+        "cron",
+        day_of_week="mon-fri",
+        hour=23,
+        minute=30,
+        timezone="Europe/Warsaw",
+        id="recommendation-audit",
+        replace_existing=True,
+    )
+    print(
+        "[scheduler] Audyt rekomendacji sprawdzany pn-pt o 23:30; "
+        f"interwał {settings.recommendation_audit_interval_days} dni, "
+        f"minimum {settings.recommendation_audit_min_new_outcomes} nowych wyników 5d"
+    )
     if settings.sms_enabled and settings.finnhub_api_key:
         scheduler.add_job(
             _premarket_gap_check,

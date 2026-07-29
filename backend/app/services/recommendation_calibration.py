@@ -4,14 +4,17 @@ from __future__ import annotations
 import json
 import math
 import threading
-import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import AssetORM, DailyAssetFeatureORM, MLTrainingRowORM
+from app.services.ml_validation import purged_group_time_series_splits
+from app.utils.datetime import ensure_utc
 
 
 FEATURE_NAMES = (
@@ -70,9 +73,20 @@ class CalibratedDecision:
     no_trade_reason: str | None
 
 
-_cache: dict[tuple[str, str, str], tuple[float, SegmentModel | None]] = {}
+_cache: dict[tuple[str, str, str], tuple[str, SegmentModel | None]] = {}
 _cache_lock = threading.Lock()
-_CACHE_TTL_SECONDS = 900.0
+
+
+def _calibration_session(market: str | None, at: datetime | None = None) -> str:
+    """Stable cache generation for one local market day.
+
+    Rebuilding the model every hour caused thresholds to oscillate intraday.
+    A market-local date keeps the fitted calibration frozen for the session,
+    while still rotating it automatically on the next trading day.
+    """
+    moment = ensure_utc(at or datetime.now(timezone.utc))
+    timezone_name = "Europe/Warsaw" if market == "GPW" else "America/New_York" if market == "USA" else "UTC"
+    return moment.astimezone(ZoneInfo(timezone_name)).date().isoformat()
 
 
 def market_segment(asset: AssetORM) -> str:
@@ -146,7 +160,14 @@ def _load_samples(db: Session, market: str | None, regime: str | None):
         stmt = stmt.where(_market_filter(market))
     if regime is not None:
         stmt = stmt.where(DailyAssetFeatureORM.regime_label == regime)
-    stmt = stmt.order_by(MLTrainingRowORM.snapshot_at.desc()).limit(
+    # The secondary keys are required: a snapshot normally contains many
+    # assets with exactly the same timestamp. Without them LIMIT could select
+    # a different boundary row on every refresh, changing the fitted model.
+    stmt = stmt.order_by(
+        MLTrainingRowORM.snapshot_at.desc(),
+        MLTrainingRowORM.asset_id.desc(),
+        MLTrainingRowORM.id.desc(),
+    ).limit(
         settings.recommendation_calibration_max_rows
     )
     rows = list(reversed(db.execute(stmt).all()))
@@ -230,7 +251,6 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import TimeSeriesSplit
 
     samples = _load_samples(db, market, regime)
     if len(samples) < settings.recommendation_calibration_min_rows:
@@ -250,8 +270,17 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
         )
 
     split_count = 4 if len(samples) >= 400 else 3
+    session_groups = [ensure_utc(row[4]).date().isoformat() for row in samples]
+    splits = purged_group_time_series_splits(
+        session_groups,
+        n_splits=split_count,
+        purge_sessions=settings.recommendation_calibration_purge_sessions,
+        min_train_sessions=settings.recommendation_calibration_min_train_sessions,
+    )
     oof_probabilities, oof_y, oof_returns, oof_costs = [], [], [], []
-    for train_idx, test_idx in TimeSeriesSplit(n_splits=split_count).split(X):
+    for train_idx, test_idx in splits:
+        train_idx = np.asarray(train_idx, dtype=int)
+        test_idx = np.asarray(test_idx, dtype=int)
         if len(set(y[train_idx].tolist())) < 2:
             continue
         fold_model = pipeline()
@@ -301,14 +330,14 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
 
 def _cached_fit(db: Session, market: str | None, regime: str | None, scope: str) -> SegmentModel | None:
     key = (str(db.get_bind().url), market or "ALL", regime or "ALL")
-    now = time.monotonic()
+    session = _calibration_session(market)
     with _cache_lock:
         cached = _cache.get(key)
-        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+        if cached and cached[0] == session:
             return cached[1]
     fitted = _fit_segment(db, market, regime, scope)
     with _cache_lock:
-        _cache[key] = (now, fitted)
+        _cache[key] = (session, fitted)
     return fitted
 
 
@@ -442,6 +471,21 @@ def calibrate_recommendation(
     )
 
 
-def invalidate_calibration_cache() -> None:
+def invalidate_calibration_cache(*, force: bool = False) -> None:
+    """Drop stale sessions, preserving today's frozen live calibration.
+
+    Scheduler dataset refreshes call this function every hour. Clearing the
+    entire cache there used to refit thresholds intraday. ``force`` remains
+    available for tests and explicit administrative maintenance.
+    """
     with _cache_lock:
-        _cache.clear()
+        if force:
+            _cache.clear()
+            return
+        stale = []
+        for key, (session, _) in _cache.items():
+            market = None if key[1] == "ALL" else key[1]
+            if session != _calibration_session(market):
+                stale.append(key)
+        for key in stale:
+            _cache.pop(key, None)

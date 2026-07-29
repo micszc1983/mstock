@@ -24,6 +24,17 @@ from app.services.paper_trading import (
 )
 
 
+def _allow_immediate_strategy_entries(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.paper_trading._entry_session_ready",
+        lambda *_args, **_kwargs: (True, None),
+    )
+    monkeypatch.setattr(
+        "app.services.paper_trading.settings.paper_entry_confirmation_cycles",
+        1,
+    )
+
+
 def test_ohlcv_validator_blocks_impossible_bar():
     bars = [SimpleNamespace(timestamp=datetime(2026, 1, 1), open=100, high=99, low=98, close=101, volume=10)]
     result = validate_series(bars)
@@ -65,6 +76,7 @@ def test_paper_trading_persists_order_trade_and_position(tmp_path):
 
 
 def test_paper_trading_allocates_cash_buckets_to_distinct_buy_recommendations(tmp_path, monkeypatch):
+    _allow_immediate_strategy_entries(monkeypatch)
     engine = create_engine(f"sqlite:///{tmp_path / 'allocation.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -127,6 +139,7 @@ def test_paper_trading_allocates_cash_buckets_to_distinct_buy_recommendations(tm
 
 
 def test_paper_trading_leaves_bucket_in_cash_when_no_additional_buy_exists(tmp_path, monkeypatch):
+    _allow_immediate_strategy_entries(monkeypatch)
     engine = create_engine(f"sqlite:///{tmp_path / 'no_force.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -164,6 +177,7 @@ def test_paper_trading_leaves_bucket_in_cash_when_no_additional_buy_exists(tmp_p
 
 
 def test_background_strategy_sells_and_reinvests_bucket(tmp_path, monkeypatch):
+    _allow_immediate_strategy_entries(monkeypatch)
     engine = create_engine(f"sqlite:///{tmp_path / 'background.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -206,3 +220,101 @@ def test_background_strategy_sells_and_reinvests_bucket(tmp_path, monkeypatch):
         assert bucket.quantity > 0
         assert db.scalar(select(func.count()).select_from(PaperOrderORM)) == 3
         assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 3
+
+
+def test_paper_strategy_requires_two_matching_closed_session_signals(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'confirmed-entry.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(AssetORM(
+            id="confirmed", symbol="CONF", name="Confirmed", type="stock", currency="USD",
+        ))
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(30):
+            db.add(PricePointORM(
+                asset_id="confirmed", timestamp=start + timedelta(days=i),
+                open=100 + i, high=101 + i, low=99 + i, close=100 + i, volume=1000,
+            ))
+        db.commit()
+        recommendation = SimpleNamespace(
+            asset_id="confirmed", symbol="CONF", name="Confirmed",
+            recommendation="KUP", data_complete=True, has_critical_alert=False,
+            expected_net_edge_pct=2.0, uncertainty_pct=0.5, composite_score=70.0,
+            confidence=75.0, transaction_cost_pct=0.2,
+            market_segment="USA", regime="bull",
+        )
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: [recommendation],
+        )
+        monkeypatch.setattr(
+            "app.services.paper_trading._entry_session_ready",
+            lambda *_args, **_kwargs: (True, None),
+        )
+        monkeypatch.setattr(
+            "app.services.paper_trading.settings.paper_entry_confirmation_cycles",
+            2,
+        )
+        account = get_or_create_account(
+            db, name="confirmed-entry", initial_cash=2000, currency="USD",
+        )
+        db.commit()
+
+        first = allocate_recommended_amounts(db, account.id, [1000])
+
+        assert first["allocations"] == []
+        first_bucket = first["account"]["strategy"]["buckets"][0]
+        assert first_bucket["pending_asset_id"] == "confirmed"
+        assert first_bucket["pending_signal_count"] == 1
+        assert first_bucket["signal_status"] == "confirming"
+        assert first["account"]["cash"] == 2000.0
+
+        second = run_active_paper_strategies(db)
+
+        assert len(second[0]["buys"]) == 1
+        snapshot = account_snapshot(db, account.id)
+        assert snapshot["strategy"]["buckets"][0]["asset_id"] == "confirmed"
+        assert snapshot["strategy"]["buckets"][0]["pending_asset_id"] is None
+
+
+def test_paper_strategy_does_not_confirm_an_open_session_signal(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'open-session.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(AssetORM(
+            id="open", symbol="OPEN", name="Open", type="stock", currency="USD",
+        ))
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(30):
+            db.add(PricePointORM(
+                asset_id="open", timestamp=start + timedelta(days=i),
+                open=100 + i, high=101 + i, low=99 + i, close=100 + i, volume=1000,
+            ))
+        db.commit()
+        recommendation = SimpleNamespace(
+            asset_id="open", symbol="OPEN", name="Open",
+            recommendation="KUP", data_complete=True, has_critical_alert=False,
+            expected_net_edge_pct=2.0, uncertainty_pct=0.5, composite_score=70.0,
+            confidence=75.0, transaction_cost_pct=0.2,
+            market_segment="USA", regime="bull",
+        )
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: [recommendation],
+        )
+        monkeypatch.setattr(
+            "app.services.paper_trading._entry_session_ready",
+            lambda *_args, **_kwargs: (False, "sesja nadal trwa"),
+        )
+        account = get_or_create_account(
+            db, name="open-session", initial_cash=2000, currency="USD",
+        )
+        db.commit()
+
+        result = allocate_recommended_amounts(db, account.id, [1000])
+
+        bucket = result["account"]["strategy"]["buckets"][0]
+        assert result["allocations"] == []
+        assert bucket["pending_asset_id"] == "open"
+        assert bucket["pending_signal_count"] == 0
+        assert result["account"]["cash"] == 2000.0

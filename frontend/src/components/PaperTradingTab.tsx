@@ -155,6 +155,7 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
       <p style={{ color: "var(--text-3)", fontSize: 13 }}>
         Automatyczna symulacja działa na serwerze także po zamknięciu strony. Co godzinę reaguje na rekomendacje,
         uwzględnia prowizję i poślizg oraz blokuje transakcje przy niepoprawnych danych OHLCV.
+        Nowe wejście wymaga zamkniętej świecy dziennej i dwóch kolejnych zgodnych cykli.
       </p>
 
       {!account ? (
@@ -232,12 +233,19 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
               {account.strategy.last_message || "Oczekuje na cykl"}
               {account.strategy.last_run_at && <> · ostatni cykl {new Date(account.strategy.last_run_at).toLocaleString("pl-PL")}</>}
             </p>
-            <div style={{ overflowX: "auto" }}><table><thead><tr><th>Koszyk</th><th>Kwota początkowa</th><th>Stan</th><th>Aktywo</th><th>Ilość</th><th>Gotówka</th><th>Wartość</th><th>Wynik</th></tr></thead><tbody>
+            <div style={{ overflowX: "auto" }}><table><thead><tr><th>Koszyk</th><th>Kwota początkowa</th><th>Stan</th><th>Sygnał</th><th>Aktywo</th><th>Ilość</th><th>Gotówka</th><th>Wartość</th><th>Wynik</th></tr></thead><tbody>
               {account.strategy.buckets.map((bucket) => <tr key={bucket.id}>
                 <td>{bucket.ordinal}</td>
                 <td>{money(bucket.initial_amount, currency)}</td>
-                <td>{bucket.status === "position" ? "Pozycja" : "Oczekuje na KUP"}</td>
-                <td>{bucket.asset_id?.toUpperCase() ?? "—"}</td>
+                <td>{bucket.status === "position" ? "Pozycja" : bucket.signal_status === "confirming" ? "Potwierdzanie" : "Oczekuje"}</td>
+                <td title={bucket.signal_message} style={{
+                  color: bucket.signal_status === "entry_active" ? "#16a34a"
+                    : bucket.signal_status === "exit_signal" ? "#dc2626"
+                    : bucket.signal_status === "entry_expired" ? "#b45309"
+                    : "var(--text-3)",
+                  maxWidth: 260,
+                }}>{bucket.signal_message}</td>
+                <td>{(bucket.asset_id ?? bucket.pending_asset_id)?.toUpperCase() ?? "—"}</td>
                 <td>{bucket.quantity ? bucket.quantity.toLocaleString("pl-PL", { maximumFractionDigits: 8 }) : "—"}</td>
                 <td>{money(bucket.cash, currency)}</td>
                 <td>{money(bucket.value, currency)}</td>

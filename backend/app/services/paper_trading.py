@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import math
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.models import (AssetORM, PaperAccountORM, PaperOrderORM, PaperPositionORM,
                            PaperStrategyBucketORM, PaperStrategyORM, PaperTradeORM,
-                           PricePointORM)
+                           PricePointORM, RecommendationRecordORM)
+from app.services.market_calendar import is_market_open
 from app.services.ohlcv_validation import validate_series
-from app.utils.datetime import now_utc
+from app.utils.datetime import ensure_utc, now_utc
 
 
 MAX_ALLOCATION_BUCKETS = 20
@@ -97,6 +100,7 @@ def strategy_snapshot(db: Session, account_id: int) -> dict | None:
     for bucket in buckets:
         last_price = None
         asset_value = 0.0
+        displayed_action = None
         if bucket.asset_id and bucket.quantity > 0:
             latest = db.scalar(
                 select(PricePointORM)
@@ -106,6 +110,35 @@ def strategy_snapshot(db: Session, account_id: int) -> dict | None:
             )
             last_price = float(latest.close) if latest else bucket.avg_price
             asset_value = bucket.quantity * last_price
+            latest_signal = db.scalar(
+                select(RecommendationRecordORM)
+                .where(RecommendationRecordORM.asset_id == bucket.asset_id)
+                .order_by(
+                    RecommendationRecordORM.created_at.desc(),
+                    RecommendationRecordORM.revision.desc(),
+                )
+                .limit(1)
+            )
+            displayed_action = latest_signal.displayed_action if latest_signal else None
+        if bucket.asset_id and bucket.quantity > 0:
+            if displayed_action == "SPRZEDAJ":
+                signal_status = "exit_signal"
+                signal_message = "Aktywny sygnał SPRZEDAJ — zamknięcie w następnym cyklu"
+            elif displayed_action == "KUP":
+                signal_status = "entry_active"
+                signal_message = "Sygnał wejścia nadal aktywny"
+            else:
+                signal_status = "entry_expired"
+                signal_message = "Sygnał wejścia wygasł — pozycja jest utrzymywana do jawnego SPRZEDAJ"
+        elif bucket.pending_asset_id:
+            signal_status = "confirming"
+            signal_message = (
+                f"Potwierdzanie KUP: {bucket.pending_signal_count}/"
+                f"{max(1, settings.paper_entry_confirmation_cycles)}"
+            )
+        else:
+            signal_status = "waiting"
+            signal_message = "Oczekuje na potwierdzoną rekomendację KUP"
         rows.append({
             "id": bucket.id,
             "ordinal": bucket.ordinal,
@@ -120,6 +153,12 @@ def strategy_snapshot(db: Session, account_id: int) -> dict | None:
                 ((bucket.cash + asset_value) / bucket.initial_amount - 1) * 100, 3
             ) if bucket.initial_amount else 0.0,
             "status": "position" if bucket.asset_id and bucket.quantity > 0 else "waiting",
+            "signal_status": signal_status,
+            "signal_message": signal_message,
+            "current_recommendation": displayed_action,
+            "pending_asset_id": bucket.pending_asset_id,
+            "pending_signal_count": bucket.pending_signal_count,
+            "pending_since": bucket.pending_since,
             "opened_at": bucket.opened_at,
             "updated_at": bucket.updated_at,
         })
@@ -238,6 +277,9 @@ def allocate_recommended_amounts(
             initial_amount=budget,
             cash=budget,
             asset_id=None,
+            pending_asset_id=None,
+            pending_signal_count=0,
+            pending_since=None,
             quantity=0.0,
             avg_price=0.0,
             opened_at=None,
@@ -294,6 +336,30 @@ def _ranked_buy_recommendations(db: Session, recommendations: list, currency: st
     return eligible
 
 
+def _entry_session_ready(asset: AssetORM, recommendation, at) -> tuple[bool, str | None]:
+    """Allow a daily strategy entry only after today's market candle is closed."""
+    if not settings.paper_require_closed_session_entry or asset.type != "stock":
+        return True, None
+    symbol = asset.price_symbol or asset.symbol or ""
+    if is_market_open(symbol, at):
+        return False, "sesja nadal trwa"
+    snapshot_at = ensure_utc(getattr(recommendation, "snapshot_at", None))
+    if snapshot_at is None:
+        return False, "rekomendacja nie ma czasu zamkniętej świecy"
+    market = getattr(recommendation, "market_segment", None)
+    zone = ZoneInfo("Europe/Warsaw" if market == "GPW" or symbol.upper().endswith(".WA") else "America/New_York")
+    local_now = ensure_utc(at).astimezone(zone)
+    if snapshot_at.astimezone(zone).date() != local_now.date():
+        return False, "brak zamkniętej świecy z bieżącej sesji"
+    return True, None
+
+
+def _clear_pending_entry(bucket: PaperStrategyBucketORM) -> None:
+    bucket.pending_asset_id = None
+    bucket.pending_signal_count = 0
+    bucket.pending_since = None
+
+
 def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations: list) -> dict:
     """Execute one background strategy using the latest frozen recommendations."""
     account = db.get(PaperAccountORM, strategy.account_id)
@@ -325,6 +391,7 @@ def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations:
         )
         if not position or position.quantity <= 0:
             bucket.asset_id = None
+            _clear_pending_entry(bucket)
             bucket.quantity = 0.0
             bucket.avg_price = 0.0
             bucket.opened_at = None
@@ -347,6 +414,7 @@ def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations:
         old_asset_id = bucket.asset_id
         bucket.cash += proceeds
         bucket.asset_id = None
+        _clear_pending_entry(bucket)
         bucket.quantity = 0.0
         bucket.avg_price = 0.0
         bucket.opened_at = None
@@ -362,15 +430,45 @@ def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations:
     occupied = {bucket.asset_id for bucket in buckets if bucket.asset_id}
     candidates = _ranked_buy_recommendations(db, recommendations, account.currency)
     candidate_index = 0
+    confirming = 0
+    session_blocked = 0
+    required_confirmations = max(1, settings.paper_entry_confirmation_cycles)
     for bucket in buckets:
         if bucket.asset_id or bucket.cash <= 0:
             continue
         while candidate_index < len(candidates) and candidates[candidate_index][0].asset_id in occupied:
             candidate_index += 1
         if candidate_index >= len(candidates):
+            if bucket.pending_asset_id:
+                _clear_pending_entry(bucket)
+                bucket.updated_at = now
             continue
         rec, reference = candidates[candidate_index]
         candidate_index += 1
+        occupied.add(rec.asset_id)
+        asset = db.get(AssetORM, rec.asset_id)
+        if asset is None:
+            _clear_pending_entry(bucket)
+            continue
+        session_ready, _ = _entry_session_ready(asset, rec, now)
+        if not session_ready:
+            if bucket.pending_asset_id != rec.asset_id:
+                bucket.pending_asset_id = rec.asset_id
+                bucket.pending_since = now
+            bucket.pending_signal_count = 0
+            bucket.updated_at = now
+            session_blocked += 1
+            continue
+        if bucket.pending_asset_id == rec.asset_id:
+            bucket.pending_signal_count += 1
+        else:
+            bucket.pending_asset_id = rec.asset_id
+            bucket.pending_signal_count = 1
+            bucket.pending_since = now
+        bucket.updated_at = now
+        if bucket.pending_signal_count < required_confirmations:
+            confirming += 1
+            continue
         component_pct = max(float(rec.transaction_cost_pct), 0.0) / 4.0
         fill_price = reference * (1 + component_pct / 100)
         unit_cash_cost = fill_price * (1 + component_pct / 100)
@@ -393,11 +491,11 @@ def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations:
         invested = float(order.fill_price or 0) * quantity + float(order.commission)
         bucket.cash = max(0.0, bucket.cash - invested)
         bucket.asset_id = rec.asset_id
+        _clear_pending_entry(bucket)
         bucket.quantity = quantity
         bucket.avg_price = invested / quantity
         bucket.opened_at = now
         bucket.updated_at = now
-        occupied.add(rec.asset_id)
         buys.append({
             "amount": round(invested + bucket.cash, 2),
             "asset_id": rec.asset_id,
@@ -421,10 +519,18 @@ def run_paper_strategy(db: Session, strategy: PaperStrategyORM, recommendations:
     strategy.updated_at = now
     strategy.last_message = (
         f"Cykl zakończony: kupiono {len(buys)}, sprzedano {len(sells)}, "
-        f"pozycje {len(buckets) - waiting}, oczekujące koszyki {waiting}"
+        f"pozycje {len(buckets) - waiting}, oczekujące koszyki {waiting}, "
+        f"potwierdzane sygnały {confirming}, oczekujące na zamknięcie sesji {session_blocked}"
     )
     db.commit()
-    return {"strategy_id": strategy.id, "buys": buys, "sells": sells, "waiting": waiting}
+    return {
+        "strategy_id": strategy.id,
+        "buys": buys,
+        "sells": sells,
+        "waiting": waiting,
+        "confirming": confirming,
+        "session_blocked": session_blocked,
+    }
 
 
 def run_active_paper_strategies(db: Session) -> list[dict]:

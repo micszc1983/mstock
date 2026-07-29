@@ -56,6 +56,15 @@ try:
         recommendation_cost_other_pct: float = 0.35
         recommendation_calibration_min_rows: int = 80
         recommendation_calibration_max_rows: int = 6000
+        recommendation_calibration_purge_sessions: int = 5
+        recommendation_calibration_min_train_sessions: int = 60
+        recommendation_forecast_consensus_veto_probability: float = 0.45
+        paper_entry_confirmation_cycles: int = 2
+        paper_require_closed_session_entry: bool = True
+        recommendation_audit_auto_enabled: bool = True
+        recommendation_audit_interval_days: int = 7
+        recommendation_audit_min_new_outcomes: int = 50
+        recommendation_audit_folds: int = 3
         triple_barrier_horizon_sessions: int = 10
         triple_barrier_take_profit_vol_multiplier: float = 1.25
         triple_barrier_stop_loss_vol_multiplier: float = 0.90
@@ -145,6 +154,15 @@ except ImportError:
         recommendation_cost_other_pct: float = float(os.getenv("RECOMMENDATION_COST_OTHER_PCT", "0.35"))
         recommendation_calibration_min_rows: int = int(os.getenv("RECOMMENDATION_CALIBRATION_MIN_ROWS", "80"))
         recommendation_calibration_max_rows: int = int(os.getenv("RECOMMENDATION_CALIBRATION_MAX_ROWS", "6000"))
+        recommendation_calibration_purge_sessions: int = int(os.getenv("RECOMMENDATION_CALIBRATION_PURGE_SESSIONS", "5"))
+        recommendation_calibration_min_train_sessions: int = int(os.getenv("RECOMMENDATION_CALIBRATION_MIN_TRAIN_SESSIONS", "60"))
+        recommendation_forecast_consensus_veto_probability: float = float(os.getenv("RECOMMENDATION_FORECAST_CONSENSUS_VETO_PROBABILITY", "0.45"))
+        paper_entry_confirmation_cycles: int = int(os.getenv("PAPER_ENTRY_CONFIRMATION_CYCLES", "2"))
+        paper_require_closed_session_entry: bool = os.getenv("PAPER_REQUIRE_CLOSED_SESSION_ENTRY", "true").lower() == "true"
+        recommendation_audit_auto_enabled: bool = os.getenv("RECOMMENDATION_AUDIT_AUTO_ENABLED", "true").lower() == "true"
+        recommendation_audit_interval_days: int = int(os.getenv("RECOMMENDATION_AUDIT_INTERVAL_DAYS", "7"))
+        recommendation_audit_min_new_outcomes: int = int(os.getenv("RECOMMENDATION_AUDIT_MIN_NEW_OUTCOMES", "50"))
+        recommendation_audit_folds: int = int(os.getenv("RECOMMENDATION_AUDIT_FOLDS", "3"))
         triple_barrier_horizon_sessions: int = int(os.getenv("TRIPLE_BARRIER_HORIZON_SESSIONS", "10"))
         triple_barrier_take_profit_vol_multiplier: float = float(os.getenv("TRIPLE_BARRIER_TAKE_PROFIT_VOL_MULTIPLIER", "1.25"))
         triple_barrier_stop_loss_vol_multiplier: float = float(os.getenv("TRIPLE_BARRIER_STOP_LOSS_VOL_MULTIPLIER", "0.90"))

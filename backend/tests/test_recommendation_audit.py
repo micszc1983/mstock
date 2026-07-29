@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -16,7 +17,11 @@ from app.db.models import (
 )
 from app.db.session import Base
 from app.schemas.recommendation import AssetRecommendation
-from app.services.recommendation_audit import run_walk_forward_audit
+from app.services.recommendation_audit import (
+    automatic_audit_status,
+    run_automatic_audit_if_due,
+    run_walk_forward_audit,
+)
 from app.services.recommendation_calibration import _walk_forward_gate
 from app.services.recommendation_journal import (
     evaluate_recommendation_outcomes,
@@ -77,6 +82,74 @@ def test_walk_forward_has_untouched_blocks_and_embargo(tmp_path, monkeypatch):
             assert (test_start - train_end).days >= 20
 
 
+def test_automatic_audit_waits_for_interval_and_new_outcomes(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'automatic_audit.db'}")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 7, 23, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        audit = RecommendationAuditRunORM(
+            created_at=now - timedelta(days=2), model_version="walk_forward_v2",
+            dataset_rows=100, eligible_rows=100, excluded_outliers=0,
+            fold_count=3, embargo_sessions=20,
+            result_json=json.dumps({"folds": [{"test_end": "2026-07-14"}]}),
+        )
+        db.add(audit)
+        db.commit()
+
+        young = automatic_audit_status(db, now=now, interval_days=7, min_new_outcomes=50)
+        assert young["due"] is False
+        assert young["reason"] == "interval_not_elapsed"
+
+        audit.created_at = now - timedelta(days=8)
+        db.commit()
+        samples = [
+            SimpleNamespace(outlier_reason=None, snapshot_at=datetime(2026, 7, 14, tzinfo=timezone.utc))
+            for _ in range(100)
+        ] + [
+            SimpleNamespace(outlier_reason=None, snapshot_at=datetime(2026, 7, 15, tzinfo=timezone.utc))
+            for _ in range(49)
+        ]
+        monkeypatch.setattr("app.services.recommendation_audit.load_audit_samples", lambda _db: samples)
+        too_few = automatic_audit_status(db, now=now, interval_days=7, min_new_outcomes=50)
+        assert too_few["due"] is False
+        assert too_few["new_outcomes"] == 49
+
+        samples.append(SimpleNamespace(
+            outlier_reason=None,
+            snapshot_at=datetime(2026, 7, 15, tzinfo=timezone.utc),
+        ))
+        ready = automatic_audit_status(db, now=now, interval_days=7, min_new_outcomes=50)
+        assert ready["due"] is True
+        assert ready["new_outcomes"] == 50
+
+
+def test_automatic_audit_runs_and_invalidates_recommendations(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'automatic_run.db'}")
+    Base.metadata.create_all(engine)
+    invalidated = []
+    monkeypatch.setattr(
+        "app.services.recommendation_audit.automatic_audit_status",
+        lambda _db, now=None: {
+            "due": True, "reason": "ready", "new_outcomes": 60,
+            "required_new_outcomes": 50, "eligible_rows": 1060,
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.recommendation_audit.run_walk_forward_audit",
+        lambda _db, fold_count: {"id": 7, "evaluated_rows": 300, "eligible_rows": 1060},
+    )
+    monkeypatch.setattr(
+        "app.services.recommendation_engine.invalidate_recommendations_cache",
+        lambda: invalidated.append(True),
+    )
+    with Session(engine) as db:
+        result = run_automatic_audit_if_due(db)
+
+    assert result["ran"] is True
+    assert result["audit_id"] == 7
+    assert invalidated == [True]
+
+
 def test_journal_is_idempotent_and_outcomes_mature_by_session(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'journal.db'}")
     Base.metadata.create_all(engine)
@@ -112,6 +185,107 @@ def test_journal_is_idempotent_and_outcomes_mature_by_session(tmp_path):
         assert row.realized_return_5d_pct == 5.0
         assert row.realized_return_20d_pct == 20.0
         assert row.strategy_net_return_5d_pct == 4.8
+
+
+def test_short_horizon_outcome_is_not_blocked_by_pending_20d_rows(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'journal-horizon-queues.db'}")
+    Base.metadata.create_all(engine)
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    def recommendation(asset_id: str, snapshot_at: datetime) -> AssetRecommendation:
+        return AssetRecommendation.model_construct(
+            asset_id=asset_id, snapshot_at=snapshot_at,
+            market_segment="USA", regime="trending", recommendation="KUP",
+            calibration_scope="market", calibration_sample_size=200,
+            composite_score=70, confidence=75, probability_buy=75,
+            probability_sell=10, probability_no_trade=15,
+            buy_threshold=65, sell_threshold=70, transaction_cost_pct=0.2,
+            expected_gross_edge_pct=1.5, expected_net_edge_pct=1.3,
+            uncertainty_pct=0.3, last_price=100,
+        )
+
+    with Session(engine) as db:
+        db.add_all([
+            AssetORM(id="old", symbol="OLD", name="Old", type="stock", currency="USD"),
+            AssetORM(id="recent", symbol="NEW", name="Recent", type="stock", currency="USD"),
+        ])
+        db.commit()
+        old_rows = []
+        for offset in (0, 1):
+            row = persist_recommendation(db, recommendation("old", start + timedelta(days=offset)))
+            assert row is not None
+            row.realized_return_1d_pct = 1.0
+            row.strategy_net_return_1d_pct = 0.8
+            row.realized_return_5d_pct = 5.0
+            row.strategy_net_return_5d_pct = 4.8
+            old_rows.append(row)
+        recent_snapshot = start + timedelta(days=10)
+        recent = persist_recommendation(db, recommendation("recent", recent_snapshot))
+        assert recent is not None
+        db.add(PricePointORM(
+            asset_id="recent", timestamp=recent_snapshot + timedelta(days=1),
+            open=110, high=110, low=110, close=110, volume=1000,
+        ))
+        db.commit()
+
+        assert evaluate_recommendation_outcomes(db, limit=2) == 1
+        db.refresh(recent)
+        assert recent.realized_return_1d_pct == 10.0
+        assert recent.realized_return_5d_pct is None
+        assert all(row.realized_return_20d_pct is None for row in old_rows)
+
+
+def test_journal_creates_revision_only_for_material_change(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'journal-revisions.db'}")
+    Base.metadata.create_all(engine)
+    snap = datetime(2025, 2, 3, tzinfo=timezone.utc)
+    with Session(engine) as db:
+        db.add(AssetORM(id="abc", symbol="ABC", name="ABC", type="stock", currency="USD"))
+        db.commit()
+        rec = AssetRecommendation.model_construct(
+            asset_id="abc", snapshot_at=snap, market_segment="USA", regime="range_bound",
+            recommendation="BRAK TRANSAKCJI", calibration_scope="market_regime",
+            calibration_sample_size=300, composite_score=54, confidence=50,
+            probability_buy=54, probability_sell=40, probability_no_trade=6,
+            buy_threshold=60, sell_threshold=60, transaction_cost_pct=0.2,
+            expected_gross_edge_pct=1.5, expected_net_edge_pct=1.3,
+            uncertainty_pct=0.3, no_trade_reason="Poniżej progu.", rationale="Brak przewagi.",
+            trend_score=20, sentiment_score=10, fragility_score=30, divergence_score=15,
+            data_complete=True, last_price=100,
+        )
+
+        initial = persist_recommendation(db, rec)
+        db.commit()
+        unchanged = persist_recommendation(db, rec)
+        db.commit()
+
+        assert initial is not None and unchanged is not None
+        assert unchanged.id == initial.id
+        assert initial.revision == 1
+        assert initial.change_type == "initial"
+
+        rec.recommendation = "KUP"
+        rec.probability_buy = 62
+        rec.probability_no_trade = 2
+        rec.confidence = 62
+        rec.no_trade_reason = None
+        rec.rationale = "Próg kupna został przekroczony."
+        changed = persist_recommendation(db, rec)
+        db.commit()
+        repeated = persist_recommendation(db, rec)
+        db.commit()
+
+        assert changed is not None and repeated is not None
+        assert changed.id != initial.id
+        assert repeated.id == changed.id
+        assert changed.revision == 2
+        assert changed.previous_record_id == initial.id
+        assert changed.change_type == "action"
+        assert "Decyzja: BRAK TRANSAKCJI → KUP" in (changed.change_summary or "")
+        details = json.loads(changed.change_details_json)
+        assert details["recommendation"] == {"from": "BRAK TRANSAKCJI", "to": "KUP"}
+        assert json.loads(changed.signal_snapshot_json)["probability_buy"] == 62
+        assert db.scalar(select(func.count()).select_from(RecommendationRecordORM)) == 2
 
 
 def test_alpha_feature_uses_trailing_return_not_future_target():

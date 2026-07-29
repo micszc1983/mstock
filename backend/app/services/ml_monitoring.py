@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from statistics import mean
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -67,7 +67,32 @@ def _population_stability_index(run: MLModelRunORM, db: Session) -> float | None
 
 
 def _outcome_metrics(run: MLModelRunORM, db: Session) -> dict:
-    stmt = select(RecommendationRecordORM).where(
+    # Dziennik przechowuje wszystkie zmiany rekomendacji w obrębie świecy.
+    # Monitoring wyników używa wyłącznie końcowej rewizji, aby jednej sesji
+    # nie liczyć wielokrotnie.
+    latest_revision = (
+        select(
+            RecommendationRecordORM.asset_id.label("asset_id"),
+            RecommendationRecordORM.snapshot_at.label("snapshot_at"),
+            RecommendationRecordORM.model_version.label("model_version"),
+            func.max(RecommendationRecordORM.revision).label("revision"),
+        )
+        .group_by(
+            RecommendationRecordORM.asset_id,
+            RecommendationRecordORM.snapshot_at,
+            RecommendationRecordORM.model_version,
+        )
+        .subquery()
+    )
+    stmt = select(RecommendationRecordORM).join(
+        latest_revision,
+        and_(
+            RecommendationRecordORM.asset_id == latest_revision.c.asset_id,
+            RecommendationRecordORM.snapshot_at == latest_revision.c.snapshot_at,
+            RecommendationRecordORM.model_version == latest_revision.c.model_version,
+            RecommendationRecordORM.revision == latest_revision.c.revision,
+        ),
+    ).where(
         RecommendationRecordORM.meta_trade_probability.is_not(None),
         RecommendationRecordORM.realized_return_5d_pct.is_not(None),
     )

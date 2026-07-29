@@ -11,6 +11,15 @@ const labels: Record<string, string> = {
 
 const pct = (value: number | null | undefined, digits = 2) => value == null ? "—" : `${value.toFixed(digits)}%`;
 const num = (value: number | null | undefined, digits = 2) => value == null ? "—" : value.toFixed(digits);
+const changeLabels: Record<RecommendationJournalRecord["change_type"], string> = {
+  initial: "pierwszy zapis",
+  legacy: "wpis historyczny",
+  action: "zmiana decyzji",
+  position: "zmiana pozycji",
+  data_quality: "zmiana danych",
+  calibration: "zmiana kalibracji",
+  signals: "zmiana sygnałów",
+};
 
 function MetricTable({ strategies }: { strategies: Record<string, RecommendationStrategyMetrics> }) {
   return <div style={{ overflowX: "auto" }}><table style={{ width: "100%" }}><thead><tr>
@@ -91,11 +100,24 @@ export function CalibrationAuditTab() {
     </>}
 
     <h3 style={{ marginTop: 24 }}>Dziennik rekomendacji</h3>
-    <div style={{ overflowX: "auto" }}><table><thead><tr><th>Czas</th><th>Aktywo</th><th>Decyzja</th><th>Rynek/reżim</th><th>Pewność</th><th>Przewaga netto</th><th>1d</th><th>5d</th><th>20d</th><th>Flaga jakości</th></tr></thead><tbody>
-      {journal.map(row => <tr key={row.id}><td>{new Date(row.snapshot_at).toLocaleString("pl-PL")}</td><td>{row.asset_id.toUpperCase()}</td><td>{row.displayed_action}{row.meta_gate_applied ? " ⛔ meta" : ""}</td>
+    <p style={{ color: "var(--text-3)", fontSize: 12 }}>
+      Każda materialna zmiana w obrębie tej samej świecy tworzy kolejną rewizję. Identyczny wynik nie jest zapisywany ponownie.
+    </p>
+    <div style={{ overflowX: "auto" }}><table><thead><tr><th>Zapisano</th><th>Świeca</th><th>Aktywo</th><th>Rewizja</th><th>Decyzja</th><th>Co się zmieniło</th><th>Rynek/reżim</th><th>Pewność</th><th>Przewaga netto</th><th>1d</th><th>5d</th><th>20d</th><th>Flaga jakości</th></tr></thead><tbody>
+      {journal.map(row => <tr key={row.id}>
+        <td style={{ whiteSpace: "nowrap" }}>{new Date(row.created_at).toLocaleString("pl-PL")}</td>
+        <td style={{ whiteSpace: "nowrap" }}>{new Date(row.snapshot_at).toLocaleString("pl-PL")}</td>
+        <td>{row.asset_id.toUpperCase()}</td>
+        <td><strong>r{row.revision}</strong><br/><small style={{ color: "var(--text-3)", whiteSpace: "nowrap" }}>{changeLabels[row.change_type] ?? row.change_type}</small></td>
+        <td>{row.displayed_action}{row.meta_gate_applied ? " ⛔ meta" : ""}</td>
+        <td style={{ minWidth: 260 }}>
+          <span title={row.rationale ?? row.no_trade_reason ?? undefined}>{row.change_summary ?? "—"}</span>
+          {row.no_trade_reason && <div style={{ marginTop: 3, color: "var(--text-3)", fontSize: 11 }}>{row.no_trade_reason}</div>}
+        </td>
         <td>{row.market}/{row.regime}</td><td>{pct(row.confidence, 1)}</td><td>{pct(row.expected_net_edge_pct)}</td>
-        <td>{pct(row.strategy_net_return_1d_pct)}</td><td>{pct(row.strategy_net_return_5d_pct)}</td><td>{pct(row.strategy_net_return_20d_pct)}</td><td>{row.quality_flag ?? "—"}</td></tr>)}
-      {!journal.length && <tr><td colSpan={10}>Dziennik jest jeszcze pusty.</td></tr>}
+        <td>{pct(row.strategy_net_return_1d_pct)}</td><td>{pct(row.strategy_net_return_5d_pct)}</td><td>{pct(row.strategy_net_return_20d_pct)}</td><td>{row.quality_flag ?? "—"}</td>
+      </tr>)}
+      {!journal.length && <tr><td colSpan={13}>Dziennik jest jeszcze pusty.</td></tr>}
     </tbody></table></div>
   </div>;
 }

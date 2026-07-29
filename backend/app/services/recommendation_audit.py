@@ -9,7 +9,7 @@ import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -475,3 +475,104 @@ def latest_audit(db: Session) -> dict | None:
     result = json.loads(row.result_json)
     result["id"] = row.id
     return result
+
+
+def automatic_audit_status(
+    db: Session,
+    now: datetime | None = None,
+    interval_days: int | None = None,
+    min_new_outcomes: int | None = None,
+) -> dict:
+    """Return whether enough time and genuinely new 5d samples justify an audit."""
+    current_time = now or datetime.now(timezone.utc)
+    interval = max(1, int(
+        interval_days if interval_days is not None else settings.recommendation_audit_interval_days
+    ))
+    minimum_new = max(1, int(
+        min_new_outcomes
+        if min_new_outcomes is not None
+        else settings.recommendation_audit_min_new_outcomes
+    ))
+    latest = db.scalar(
+        select(RecommendationAuditRunORM)
+        .order_by(RecommendationAuditRunORM.created_at.desc())
+        .limit(1)
+    )
+    if latest is not None:
+        created_at = latest.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age = current_time - created_at
+        if age < timedelta(days=interval):
+            return {
+                "due": False,
+                "reason": "interval_not_elapsed",
+                "last_audit_at": created_at,
+                "age_days": round(age.total_seconds() / 86400, 2),
+                "new_outcomes": 0,
+                "required_new_outcomes": minimum_new,
+            }
+
+    samples = load_audit_samples(db)
+    eligible = [sample for sample in samples if sample.outlier_reason is None]
+    eligible_rows = len(eligible)
+    last_test_date = None
+    if latest is not None:
+        try:
+            payload = json.loads(latest.result_json)
+            test_ends = [
+                datetime.fromisoformat(str(fold["test_end"])).date()
+                for fold in payload.get("folds", [])
+                if fold.get("test_end")
+            ]
+            if test_ends:
+                last_test_date = max(test_ends)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            last_test_date = None
+        if last_test_date is None:
+            last_test_date = latest.created_at.date()
+    new_outcomes = (
+        sum(sample.snapshot_at.date() > last_test_date for sample in eligible)
+        if last_test_date is not None
+        else eligible_rows
+    )
+    if new_outcomes < minimum_new:
+        return {
+            "due": False,
+            "reason": "not_enough_new_outcomes",
+            "last_audit_at": latest.created_at if latest is not None else None,
+            "eligible_rows": eligible_rows,
+            "last_test_date": last_test_date,
+            "new_outcomes": new_outcomes,
+            "required_new_outcomes": minimum_new,
+        }
+    return {
+        "due": True,
+        "reason": "ready",
+        "last_audit_at": latest.created_at if latest is not None else None,
+        "eligible_rows": eligible_rows,
+        "last_test_date": last_test_date,
+        "new_outcomes": new_outcomes,
+        "required_new_outcomes": minimum_new,
+    }
+
+
+def run_automatic_audit_if_due(db: Session, now: datetime | None = None) -> dict:
+    if not settings.recommendation_audit_auto_enabled:
+        return {"ran": False, "due": False, "reason": "disabled"}
+    status = automatic_audit_status(db, now=now)
+    if not status["due"]:
+        return {"ran": False, **status}
+    report = run_walk_forward_audit(
+        db,
+        fold_count=max(2, min(5, int(settings.recommendation_audit_folds))),
+    )
+    from app.services.recommendation_engine import invalidate_recommendations_cache
+    invalidate_recommendations_cache()
+    return {
+        "ran": True,
+        **status,
+        "audit_id": report["id"],
+        "evaluated_rows": report["evaluated_rows"],
+        "eligible_rows": report["eligible_rows"],
+    }

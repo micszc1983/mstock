@@ -615,6 +615,11 @@ class PaperStrategyBucketORM(Base):
     initial_amount: Mapped[float] = mapped_column(Float)
     cash: Mapped[float] = mapped_column(Float)
     asset_id: Mapped[Optional[str]] = mapped_column(ForeignKey("assets.id"), nullable=True, index=True)
+    pending_asset_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("assets.id"), nullable=True, index=True,
+    )
+    pending_signal_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    pending_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_price: Mapped[float] = mapped_column(Float, default=0.0)
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -667,13 +672,13 @@ class PaperTradeORM(Base):
 
 
 class RecommendationRecordORM(Base):
-    """Niezmienny dziennik decyzji modelu i ich późniejszych rezultatów."""
+    """Niezmienny, wersjonowany dziennik decyzji i ich późniejszych rezultatów."""
 
     __tablename__ = "recommendation_records"
     __table_args__ = (
         UniqueConstraint(
-            "asset_id", "snapshot_at", "model_version",
-            name="uq_recommendation_record_snapshot",
+            "asset_id", "snapshot_at", "model_version", "revision",
+            name="uq_recommendation_record_revision",
         ),
     )
 
@@ -682,6 +687,15 @@ class RecommendationRecordORM(Base):
     snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     model_version: Mapped[str] = mapped_column(String(32), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    previous_record_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("recommendation_records.id"), nullable=True, index=True,
+    )
+    decision_signature: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    change_type: Mapped[str] = mapped_column(String(32), default="initial", server_default="initial", index=True)
+    change_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    change_details_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    signal_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     market: Mapped[str] = mapped_column(String(16), index=True)
     regime: Mapped[str] = mapped_column(String(64), index=True)
     action: Mapped[str] = mapped_column(String(16), index=True)
@@ -704,6 +718,9 @@ class RecommendationRecordORM(Base):
     meta_gate_applied: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     meta_trade_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     meta_threshold_scope: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    no_trade_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    data_complete: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     base_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     quality_flag: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     realized_return_1d_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

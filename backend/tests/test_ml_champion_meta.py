@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -171,3 +172,42 @@ def test_active_model_fallback_never_uses_another_asset(tmp_path):
         db.commit()
 
         assert get_active_model_run(db, "target_meta_label", asset_id="xyz") is None
+
+
+def test_automatic_training_includes_twenty_day_direction(monkeypatch):
+    from app.services import ml_foundation
+
+    calls = []
+    monkeypatch.setattr(
+        ml_foundation,
+        "list_assets",
+        lambda _db: [SimpleNamespace(id="abc")],
+    )
+    monkeypatch.setattr(
+        ml_foundation,
+        "list_training_rows_for_target",
+        lambda *_args, **_kwargs: [object()] * ml_foundation.settings.ml_min_training_rows,
+    )
+    monkeypatch.setattr(
+        ml_foundation,
+        "train_champion_challengers",
+        lambda _db, *, target_name, asset_id, market=None: (
+            calls.append((asset_id, market, target_name)) or {"promoted": False}
+        ),
+    )
+    monkeypatch.setattr(ml_foundation.settings, "ml_market_models_enabled", False)
+
+    results = ml_foundation.train_all_targets(object())
+
+    assert [target for _, _, target in calls] == [
+        "target_up_5d",
+        "target_up_20d",
+        "target_triple_barrier",
+        "target_meta_label",
+    ]
+    assert {result["target"] for result in results} == {
+        "target_up_5d",
+        "target_up_20d",
+        "target_triple_barrier",
+        "target_meta_label",
+    }

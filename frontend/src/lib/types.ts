@@ -491,7 +491,10 @@ export type RecommendationAudit = {
 
 export type RecommendationJournalRecord = {
   id: number; asset_id: string; snapshot_at: string; created_at: string;
-  model_version: string; market: string; regime: string; action: string;
+  model_version: string; revision: number; previous_record_id: number | null;
+  change_type: "initial" | "legacy" | "action" | "position" | "data_quality" | "calibration" | "signals";
+  change_summary: string | null; change_details_json: string; signal_snapshot_json: string;
+  market: string; regime: string; action: string;
   displayed_action: string; has_position: boolean; calibration_scope: string;
   calibration_sample_size: number; composite_score: number; confidence: number;
   probability_buy: number; probability_sell: number; probability_no_trade: number;
@@ -504,6 +507,7 @@ export type RecommendationJournalRecord = {
   evaluated_at: string | null;
   meta_trade_probability: number | null; meta_gate_applied: boolean;
   meta_trade_threshold: number | null; meta_threshold_scope: string | null;
+  no_trade_reason: string | null; rationale: string | null; data_complete: boolean;
 };
 
 export type EarningsRecord = {
@@ -978,6 +982,12 @@ export type PaperStrategyBucket = {
   value: number;
   return_pct: number;
   status: "waiting" | "position";
+  signal_status: "waiting" | "confirming" | "entry_active" | "entry_expired" | "exit_signal";
+  signal_message: string;
+  current_recommendation: string | null;
+  pending_asset_id: string | null;
+  pending_signal_count: number;
+  pending_since: string | null;
   opened_at: string | null;
   updated_at: string;
 };
