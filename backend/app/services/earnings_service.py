@@ -32,6 +32,8 @@ def _should_sync_earnings(asset_row: AssetORM) -> bool:
     """Tylko akcje z symbolem — nie metale, nie ETFy bez EPS."""
     if asset_row.type == "metal":
         return False
+    if (asset_row.sector or "").upper().startswith("ETF"):
+        return False
     symbol = (asset_row.price_symbol or asset_row.symbol or "").upper()
     if symbol in _ETF_SYMBOLS:
         return False

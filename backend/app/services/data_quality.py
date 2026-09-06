@@ -93,18 +93,18 @@ def _score_price(q: PriceQuality) -> float:
 
 def _score_news(q: NewsQuality) -> float:
     s = 0.0
-    if q.items_7d >= 5:
+    if q.relevant_items_7d >= 5:
         s += 0.25
-    elif q.items_7d >= 2:
+    elif q.relevant_items_7d >= 2:
         s += 0.15
-    elif q.items_7d >= 1:
+    elif q.relevant_items_7d >= 1:
         s += 0.08
     if not q.is_stale:
         s += 0.30
     elif q.staleness_hours and q.staleness_hours < 96:
         s += 0.15
     s += 0.25 * min(1.0, q.items_30d / 20)
-    s += 0.20 * (q.nlp_coverage_pct / 100)
+    s += 0.20 * (q.current_model_coverage_30d_pct / 100)
     return round(min(1.0, s), 3)
 
 
@@ -247,7 +247,7 @@ def _analyze_news(db: Session, asset_id: str) -> NewsQuality:
 
     # NLP enrichment coverage — ile newsów ma NLP run
     nlp_enriched = db.scalar(
-        select(func.count(NewsNLPRunORM.id.distinct()))
+        select(func.count(NewsNLPRunORM.news_id.distinct()))
         .where(
             NewsNLPRunORM.news_id.in_(
                 select(NewsItemORM.id).where(NewsItemORM.asset_id == asset_id)
@@ -255,6 +255,34 @@ def _analyze_news(db: Session, asset_id: str) -> NewsQuality:
         )
     ) or 0
     nlp_pct = round(nlp_enriched / max(1, total) * 100, 1) if total > 0 else 0.0
+
+    from app.core.config import settings
+    from app.services.news_features import latest_nlp_runs
+    from app.services.nlp_backends.registry import get_nlp_backend
+    recent_rows = list(db.scalars(
+        select(NewsItemORM).where(
+            NewsItemORM.asset_id == asset_id,
+            NewsItemORM.published_at >= cutoff_30d,
+        )
+    ).all())
+    latest = latest_nlp_runs(db, [row.id for row in recent_rows])
+    model_name = get_nlp_backend().model_name
+    current_30d = sum(run.model_name == model_name for run in latest.values())
+    current_coverage = round(current_30d / max(1, items_30d) * 100, 1) if items_30d else 0.0
+    rows_7d = [row for row in recent_rows if ensure_utc(row.published_at) >= cutoff_7d]
+    runs_7d = [latest[row.id] for row in rows_7d if row.id in latest]
+    relevant_rows_7d = [
+        row for row in rows_7d
+        if row.id in latest and latest[row.id].relevance_score >= settings.news_min_relevance
+    ]
+    relevance_mean = round(
+        sum(float(run.relevance_score) for run in runs_7d) / max(1, len(runs_7d)), 3
+    ) if runs_7d else 0.0
+    low_relevance_pct = round(
+        sum(float(run.relevance_score) < settings.news_min_relevance for run in runs_7d)
+        / max(1, len(runs_7d)) * 100,
+        1,
+    ) if runs_7d else 0.0
 
     q = NewsQuality(
         total_items=total,
@@ -265,6 +293,13 @@ def _analyze_news(db: Session, asset_id: str) -> NewsQuality:
         is_stale=_is_market_data_stale(last_ts, 72),
         nlp_enriched=nlp_enriched,
         nlp_coverage_pct=nlp_pct,
+        nlp_model=model_name,
+        current_model_items_30d=current_30d,
+        current_model_coverage_30d_pct=current_coverage,
+        relevant_items_7d=len(relevant_rows_7d),
+        relevance_mean_7d=relevance_mean,
+        low_relevance_pct_7d=low_relevance_pct,
+        source_count_7d=len({row.source for row in relevant_rows_7d}),
         score=0.0,
     )
     q.score = _score_news(q)
@@ -456,6 +491,14 @@ def _build_issues(
         warnings.append("Brak newsów w ostatnich 7 dniach")
     if news.nlp_coverage_pct < 30 and news.total_items > 0:
         warnings.append(f"Niski NLP coverage ({news.nlp_coverage_pct:.0f}%) — uruchom enrichment")
+    if news.items_7d > 0 and news.relevant_items_7d == 0:
+        warnings.append("Brak trafnych newsów w 7d — surowe artykuły nie wpływają na rekomendację")
+    elif news.low_relevance_pct_7d > 70:
+        warnings.append(f"Dużo nietrafnych newsów w 7d ({news.low_relevance_pct_7d:.0f}%)")
+    if news.items_30d > 0 and news.current_model_coverage_30d_pct < 50:
+        warnings.append(
+            f"Model {news.nlp_model}: przetworzono {news.current_model_coverage_30d_pct:.0f}% newsów z 30d"
+        )
 
     # Features
     if not features.has_snapshot:
@@ -555,6 +598,7 @@ def check_all_quality(db: Session) -> DataQualityReport:
         ),
         "stale_prices": sum(1 for r in results if r.prices.is_stale),
         "stale_news": sum(1 for r in results if r.news.is_stale),
+        "assets_without_relevant_news_7d": sum(1 for r in results if r.news.relevant_items_7d == 0),
         "stale_features": sum(1 for r in results if r.features.is_stale),
         "sync_errors_24h": sum(r.sync.errors_24h for r in results),
     }

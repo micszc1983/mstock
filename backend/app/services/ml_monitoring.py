@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from statistics import mean
+from statistics import mean, median
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -17,6 +17,9 @@ from app.services.ml_models.calibration import expected_calibration_error
 from app.utils.datetime import ensure_utc, now_utc
 
 
+_PSI_METHOD = "median_feature_psi_v2"
+
+
 def _metrics(row: MLModelRunORM) -> dict:
     try:
         return json.loads(row.metrics_json)
@@ -24,46 +27,159 @@ def _metrics(row: MLModelRunORM) -> dict:
         return {}
 
 
-def _population_stability_index(run: MLModelRunORM, db: Session) -> float | None:
-    import numpy as np
+def _latest_monitor(db: Session, model_run_id: int) -> MLModelMonitorORM | None:
+    return db.scalar(
+        select(MLModelMonitorORM)
+        .where(MLModelMonitorORM.model_run_id == model_run_id)
+        .order_by(MLModelMonitorORM.checked_at.desc())
+        .limit(1)
+    )
+
+
+def _prediction_feature_payloads(
+    run: MLModelRunORM, db: Session, limit: int,
+) -> list[dict]:
+    """Cechy faktycznie przekazane modelowi po jego wdrożeniu."""
+    rows = db.scalars(
+        select(MLPredictionORM)
+        .where(
+            MLPredictionORM.model_run_id == run.id,
+            MLPredictionORM.target_name == run.target_name,
+            MLPredictionORM.snapshot_at > run.trained_at,
+        )
+        .order_by(MLPredictionORM.snapshot_at.desc())
+        .limit(limit)
+    ).all()
+    payloads: list[dict] = []
+    for row in rows:
+        try:
+            features = json.loads(row.raw_json).get("features")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(features, dict):
+            payloads.append(features)
+    return payloads
+
+
+def _latest_feature_payloads(
+    run: MLModelRunORM, db: Session, limit: int,
+) -> list[dict]:
+    """Fallback bez opóźnienia targetu; DESC+LIMIT gwarantuje najnowsze wiersze."""
     from app.services.meta_labeling import enrich_meta_features
+
+    stmt = select(MLTrainingRowORM)
+    if run.asset_id is not None:
+        stmt = stmt.where(MLTrainingRowORM.asset_id == run.asset_id)
+    elif run.market_segment is not None:
+        stmt = stmt.where(MLTrainingRowORM.market_segment == run.market_segment)
+    rows = db.scalars(
+        stmt.order_by(MLTrainingRowORM.snapshot_at.desc()).limit(limit)
+    ).all()
+    payloads: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row.feature_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        # OOF meta-cechy są opcjonalne w fallbacku. Nigdy nie zastępujemy ich
+        # zerami, bo taki rozkład nie odpowiada wejściu modelu live.
+        if (
+            run.target_name == "target_meta_label"
+            and row.meta_primary_probability is not None
+            and row.meta_primary_margin is not None
+            and row.meta_model_disagreement is not None
+        ):
+            payload = enrich_meta_features(payload, row=row)
+        payloads.append(payload)
+    return payloads
+
+
+def _population_stability_report(run: MLModelRunORM, db: Session) -> dict:
+    import numpy as np
 
     metrics = _metrics(run)
     reference = metrics.get("feature_reference") or {}
     feature_names = metrics.get("feature_names") or []
     if not reference or not feature_names:
-        return None
-    rows = list_training_rows_for_target(
-        db, run.target_name, asset_id=run.asset_id,
-        market_segment=run.market_segment, limit=2000,
-    )[-200:]
-    if len(rows) < 30:
-        return None
-    payloads = []
-    for row in rows:
-        payload = json.loads(row.feature_json)
-        if run.target_name == "target_meta_label":
-            payload = enrich_meta_features(payload, row=row)
-        payloads.append(payload)
-    scores = []
+        return {"psi": None, "ready": False, "reason": "brak referencji cech"}
+    window = max(30, int(settings.ml_drift_window_rows))
+    minimum_live = max(10, int(settings.ml_drift_min_live_predictions))
+    live_payloads = _prediction_feature_payloads(run, db, window)
+    if len(live_payloads) >= minimum_live:
+        payloads = live_payloads
+        source = "live_predictions"
+    else:
+        payloads = _latest_feature_payloads(run, db, window)
+        source = "latest_feature_snapshots"
+    if len(payloads) < 30:
+        return {
+            "psi": None, "ready": False, "reason": "za mało obserwacji cech",
+            "source": source, "sample_size": len(payloads),
+            "live_prediction_samples": len(live_payloads),
+        }
+
+    scores: list[tuple[str, float]] = []
+    excluded: list[str] = []
     for name in feature_names:
         ref = reference.get(name)
         if not ref:
+            continue
+        observed = [payload.get(name) for payload in payloads if payload.get(name) is not None]
+        if len(observed) < 30:
+            excluded.append(name)
             continue
         edges = [
             -float("inf") if value is None and index == 0 else
             float("inf") if value is None else float(value)
             for index, value in enumerate(ref["edges"])
         ]
-        current = np.asarray([float(payload.get(name, 0.0) or 0.0) for payload in payloads])
+        # Brak klucza w fallbacku oznacza, że cecha nie została wtedy
+        # wyliczona (szczególnie OOF meta), a nie rzeczywistą wartość zero.
+        current = np.asarray([float(value or 0.0) for value in observed])
         counts, _ = np.histogram(current, bins=edges)
         actual = counts / max(1, counts.sum())
         expected = np.asarray(ref["proportions"], dtype=float)
         size = min(len(actual), len(expected))
         actual = np.clip(actual[:size], 1e-6, None)
         expected = np.clip(expected[:size], 1e-6, None)
-        scores.append(float(np.sum((actual - expected) * np.log(actual / expected))))
-    return round(float(mean(scores)), 6) if scores else None
+        actual /= actual.sum()
+        expected /= expected.sum()
+        score = float(np.sum((actual - expected) * np.log(actual / expected)))
+        scores.append((name, score))
+    if not scores:
+        return {
+            "psi": None, "ready": False, "reason": "brak wspólnych cech",
+            "source": source, "sample_size": len(payloads),
+            "live_prediction_samples": len(live_payloads),
+        }
+
+    values = [score for _, score in scores]
+    ranked = sorted(scores, key=lambda item: item[1], reverse=True)
+    return {
+        # Mediana wykrywa szeroki drift i nie pozwala, by pojedyncza skokowa
+        # cecha makro (np. miesięczne GS10) zablokowała cały model.
+        "psi": round(float(median(values)), 6),
+        "ready": True,
+        "method": _PSI_METHOD,
+        "source": source,
+        "sample_size": len(payloads),
+        "live_prediction_samples": len(live_payloads),
+        "feature_count": len(scores),
+        "excluded_features": excluded,
+        "mean_feature_psi": round(float(mean(values)), 6),
+        "max_feature_psi": round(float(max(values)), 6),
+        "critical_feature_ratio": round(
+            sum(score >= settings.ml_drift_psi_critical for score in values) / len(values), 6
+        ),
+        "top_drift_features": [
+            {"feature": name, "psi": round(score, 6)} for name, score in ranked[:8]
+        ],
+    }
+
+
+def _population_stability_index(run: MLModelRunORM, db: Session) -> float | None:
+    """Kompatybilny interfejs zwracający odporny, zagregowany PSI."""
+    return _population_stability_report(run, db).get("psi")
 
 
 def _outcome_metrics(run: MLModelRunORM, db: Session) -> dict:
@@ -227,7 +343,9 @@ def monitor_active_models(db: Session, *, allow_rollback: bool = True) -> list[M
     )).all())
     results = []
     for run in active:
-        psi = _population_stability_index(run, db)
+        previous_monitor = _latest_monitor(db, run.id)
+        drift = _population_stability_report(run, db)
+        psi = drift.get("psi")
         outcomes = _prediction_outcome_metrics(run, db)
         if outcomes.get("sample_size", 0) == 0 and run.target_name == "target_meta_label":
             # Recommendation journal is a secondary live source for old meta
@@ -238,7 +356,21 @@ def monitor_active_models(db: Session, *, allow_rollback: bool = True) -> list[M
         profit_factor = outcomes.get("recent_profit_factor")
         calibration_error = outcomes.get("calibration_error")
         drift_warning = psi is not None and psi >= settings.ml_drift_psi_warning
-        drift_critical = psi is not None and psi >= settings.ml_drift_psi_critical
+        drift_critical_raw = psi is not None and psi >= settings.ml_drift_psi_critical
+        previous_critical = False
+        if previous_monitor is not None:
+            try:
+                previous_details = json.loads(previous_monitor.details_json or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_details = {}
+            previous_critical = (
+                previous_details.get("psi_method") == _PSI_METHOD
+                and bool(previous_details.get("drift_critical_raw"))
+            )
+        # Pojedynczy skok rozkładu przenosi model do shadow. Status degraded
+        # wymaga potwierdzenia w kolejnym cyklu tego samego algorytmu PSI.
+        drift_critical = drift_critical_raw and previous_critical
+        drift_confirmation_pending = drift_critical_raw and not previous_critical
         performance_bad = (
             sample_size >= settings.ml_monitor_min_outcomes
             and avg_return is not None and avg_return <= 0
@@ -267,12 +399,30 @@ def monitor_active_models(db: Session, *, allow_rollback: bool = True) -> list[M
         elif degraded:
             action = "alert"
         details = {
-            "drift_warning": drift_warning, "drift_critical": drift_critical,
+            "psi_method": _PSI_METHOD,
+            "drift_ready": bool(drift.get("ready")),
+            "drift_source": drift.get("source"),
+            "drift_sample_size": drift.get("sample_size", 0),
+            "live_prediction_samples": drift.get("live_prediction_samples", 0),
+            "drift_warning": drift_warning,
+            "drift_critical_raw": drift_critical_raw,
+            "drift_critical": drift_critical,
+            "drift_confirmation_pending": drift_confirmation_pending,
+            "feature_count": drift.get("feature_count", 0),
+            "excluded_features": drift.get("excluded_features", []),
+            "mean_feature_psi": drift.get("mean_feature_psi"),
+            "max_feature_psi": drift.get("max_feature_psi"),
+            "critical_feature_ratio": drift.get("critical_feature_ratio"),
+            "top_drift_features": drift.get("top_drift_features", []),
             "performance_bad": performance_bad, "calibration_bad": calibration_bad,
             "replacement_run_id": replacement.id if replacement else None,
             "coverage_pct": outcomes.get("coverage_pct"),
             "strategy_avg_return_pct": outcomes.get("strategy_avg_return_pct"),
-            "activation_gate": "eligible" if not degraded and sample_size >= settings.ml_monitor_min_outcomes else "shadow",
+            "activation_gate": (
+                "eligible" if drift.get("ready") and not drift_confirmation_pending
+                and not degraded and sample_size >= settings.ml_monitor_min_outcomes
+                else "shadow"
+            ),
         }
         row = MLModelMonitorORM(
             model_run_id=run.id, checked_at=now_utc(), asset_id=run.asset_id,

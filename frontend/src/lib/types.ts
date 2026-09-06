@@ -149,6 +149,8 @@ export type MLActiveModel = {
   eligible_models: number;
   shadow_models: number;
   degraded_models: number;
+  outcome_samples: number;
+  min_outcome_samples: number;
   activation_state: "untrained" | "shadow" | "degraded" | "partial" | "eligible";
 };
 
@@ -166,6 +168,8 @@ export type MLStatus = {
   eligible_models: number;
   shadow_models: number;
   degraded_models: number;
+  outcome_samples: number;
+  min_outcome_samples: number;
   targets: MLActiveModel[];
 };
 
@@ -561,7 +565,7 @@ export type EarningsCallAnalysis = {
 };
 
 export type PriceQuality    = { total_points: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; gap_count: number; gap_pct: number; score: number; };
-export type NewsQuality     = { total_items: number; items_7d: number; items_30d: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; nlp_enriched: number; nlp_coverage_pct: number; score: number; };
+export type NewsQuality     = { total_items: number; items_7d: number; items_30d: number; last_timestamp: string | null; staleness_hours: number | null; is_stale: boolean; nlp_enriched: number; nlp_coverage_pct: number; nlp_model: string; current_model_items_30d: number; current_model_coverage_30d_pct: number; relevant_items_7d: number; relevance_mean_7d: number; low_relevance_pct_7d: number; source_count_7d: number; score: number; };
 export type FeatureQuality  = { has_snapshot: boolean; staleness_hours: number | null; is_stale: boolean; scores_nonzero: boolean; has_all_forecasts: boolean; has_decision_snapshot: boolean; score: number; };
 export type MLQuality       = { training_rows: number; labeled_rows_5d: number; labeled_rows_20d: number; labeled_rows_thesis: number; label_coverage_pct: number; min_required: number; ready_for_training: boolean; score: number; };
 export type SyncQuality     = { errors_24h: number; errors_7d: number; total_syncs_7d: number; error_rate_7d: number; last_successful_sync: string | null; last_error: string | null; score: number; };
@@ -664,6 +668,7 @@ export type SmsAlertConfig = {
   };
   alert_rules: Record<string, AlertRuleConfig>;
   top_picks_sms: { enabled: boolean };
+  paper_trading_sms: { enabled: boolean };
   portfolio_sell_urgent: { enabled: boolean; cooldown_minutes: number };
   premarket_gap: {
     enabled: boolean;

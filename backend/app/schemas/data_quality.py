@@ -23,6 +23,13 @@ class NewsQuality(BaseModel):
     is_stale: bool                          # >72h bez newsów
     nlp_enriched: int                       # ile ma NLP run
     nlp_coverage_pct: float                 # % z NLP
+    nlp_model: str
+    current_model_items_30d: int
+    current_model_coverage_30d_pct: float
+    relevant_items_7d: int
+    relevance_mean_7d: float
+    low_relevance_pct_7d: float
+    source_count_7d: int
     score: float
 
 

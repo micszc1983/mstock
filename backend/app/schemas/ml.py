@@ -39,6 +39,8 @@ class MLActiveModel(BaseModel):
     eligible_models: int = 0
     shadow_models: int = 0
     degraded_models: int = 0
+    outcome_samples: int = 0
+    min_outcome_samples: int = 0
     activation_state: str = "untrained"
 
 
@@ -57,6 +59,8 @@ class MLStatusResponse(BaseModel):
     eligible_models: int = 0
     shadow_models: int = 0
     degraded_models: int = 0
+    outcome_samples: int = 0
+    min_outcome_samples: int = 0
     # nowe: stan każdego targetu
     targets: list[MLActiveModel] = []
 

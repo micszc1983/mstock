@@ -31,6 +31,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from app.core.config import settings
 from app.repositories.assets import get_asset
 from app.repositories.portfolio_positions import list_positions
+from app.repositories.prices import list_prices
+from app.services.currency_service import to_pln
 
 # ── Rejestracja czcionek z polskimi znakami ───────────────────────────────────
 _FONTS_DIR = "/usr/share/fonts/truetype/dejavu"
@@ -101,14 +103,29 @@ def build_portfolio_pdf(db: Session, recommendations: dict) -> bytes:
         return "—"
 
     def build_row(pos, asset, rd: dict):
-        last  = rd.get("last_price") or 0.0
-        curr  = rd.get("currency", "USD")
+        source_last = 0.0
+        prices = list_prices(db, pos.asset_id, limit=1)
+        if prices:
+            source_last = float(prices[-1].close)
+        elif rd.get("last_price"):
+            source_last = float(rd["last_price"])
+        source_currency = asset.currency if asset else rd.get("currency", "PLN")
+        try:
+            last = float(to_pln(source_last, source_currency) or 0.0)
+        except ValueError:
+            last = 0.0
+        curr  = "PLN"
         rec   = rd.get("recommendation")
         ml    = rd.get("ml_prediction")
         f5    = rd.get("forecast_dir_5d")
         f20   = rd.get("forecast_dir_20d")
         val   = pos.quantity * last
         avg   = pos.avg_buy_price
+        if avg is not None and pos.cost_currency != "PLN" and source_currency != "PLN":
+            try:
+                avg = to_pln(avg, source_currency, pos.purchase_date)
+            except ValueError:
+                avg = None
         if avg and last and avg > 0:
             pl_pct = (last - avg) / avg * 100.0
             pl_str = f"{pl_pct:+.1f}%"
@@ -134,7 +151,7 @@ def build_portfolio_pdf(db: Session, recommendations: dict) -> bytes:
         asset = get_asset(db, pos.asset_id)
         rd    = recommendations.get(pos.asset_id, {})
         row, rec, val, pl_pct = build_row(pos, asset, rd)
-        curr = rd.get("currency", "USD")
+        curr = "PLN"
         if val:
             total_by_currency[curr] = total_by_currency.get(curr, 0) + val
         if rec == "KUP":

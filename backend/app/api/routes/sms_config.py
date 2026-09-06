@@ -49,6 +49,7 @@ def get_sms_alert_config():
         },
         "alert_rules": cfg.get("alert_rules", {}),
         "top_picks_sms": cfg.get("top_picks_sms", {}),
+        "paper_trading_sms": cfg.get("paper_trading_sms", {}),
         "portfolio_sell_urgent": cfg.get("portfolio_sell_urgent", {}),
         "premarket_gap": cfg.get("premarket_gap", {}),
         "alert_rule_labels": ALERT_RULE_LABELS,
@@ -60,7 +61,10 @@ def get_sms_alert_config():
 
 @router.post("/sms-alert-config")
 def save_sms_alert_config(body: dict):
-    allowed_keys = {"alert_rules", "top_picks_sms", "portfolio_sell_urgent", "premarket_gap"}
+    allowed_keys = {
+        "alert_rules", "top_picks_sms", "paper_trading_sms",
+        "portfolio_sell_urgent", "premarket_gap",
+    }
     filtered = {k: v for k, v in body.items() if k in allowed_keys}
     current = load_config()
     merged = {**current, **filtered}

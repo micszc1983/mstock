@@ -16,7 +16,7 @@ router = APIRouter(tags=["nlp"])
 def enrich_asset_news(asset_id: str, limit: int = Query(default=50, ge=1, le=500), db: Session = Depends(get_db)) -> dict:
     if get_asset(db, asset_id) is None:
         raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
-    enriched = enrich_news_for_asset(db, asset_id, limit=limit)
+    enriched = enrich_news_for_asset(db, asset_id, limit=limit, upgrade_limit=limit)
     return {"asset_id": asset_id, "enriched": enriched}
 
 
@@ -24,7 +24,12 @@ def enrich_asset_news(asset_id: str, limit: int = Query(default=50, ge=1, le=500
 def enrich_all_news(limit_per_asset: int = Query(default=200, ge=1, le=2000), db: Session = Depends(get_db)) -> dict:
     results = {}
     for asset in list_assets(db):
-        n = enrich_news_for_asset(db, asset.id, limit=limit_per_asset)
+        n = enrich_news_for_asset(
+            db,
+            asset.id,
+            limit=limit_per_asset,
+            upgrade_limit=limit_per_asset,
+        )
         if n > 0:
             results[asset.id] = n
     return {"enriched": sum(results.values()), "per_asset": results}

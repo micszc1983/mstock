@@ -6,7 +6,7 @@ Wymagania (zainstaluj ręcznie lub dodaj do requirements.txt):
 
 Modele pobierane automatycznie przy pierwszym użyciu (cache w ~/.cache/huggingface):
   ProsusAI/finbert                    (~440 MB)  — sentiment finansowy
-  sentence-transformers/all-MiniLM-L6-v2 (~80 MB) — embeddingi do narracji i relevance
+  sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 — narracje i relevance PL/EN
 
 Wzorzec: lazy singleton — modele ładowane raz przy pierwszym wywołaniu,
 potem trzymane w pamięci. Backend działa w tym samym procesie co FastAPI.
@@ -17,6 +17,7 @@ Czas inferencji per news: ~50–200ms (CPU), ~10–30ms (GPU).
 from __future__ import annotations
 
 import math
+import re
 from typing import Optional
 
 from app.schemas.common import AssetType, NarrativeLabel
@@ -120,7 +121,7 @@ class TransformerNLPBackend(NLPBackend):
 
     @property
     def model_name(self) -> str:
-        return "finbert_minilm_v1"
+        return "finbert_multilingual_minilm_v2"
 
     # ── Private loaders ──────────────────────────────────────────────────────
 
@@ -144,8 +145,10 @@ class TransformerNLPBackend(NLPBackend):
         if self._st_model is not None:
             return self._st_model
         from sentence_transformers import SentenceTransformer
-        print("[NLP] Ładowanie SentenceTransformer (all-MiniLM-L6-v2)…")
-        self._st_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        print("[NLP] Ładowanie SentenceTransformer (multilingual MiniLM)…")
+        self._st_model = SentenceTransformer(
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
         print("[NLP] SentenceTransformer załadowany.")
         return self._st_model
 
@@ -171,6 +174,13 @@ class TransformerNLPBackend(NLPBackend):
         Score = positive_prob - negative_prob → [-1, +1].
         """
         text = f"{title}. {body}"[:512]
+        # FinBERT jest modelem angielskim. Dla tekstów polskich bezpieczniejszy
+        # jest rozbudowany słownik finansowy PL niż pozornie pewna predykcja EN.
+        lowered = f" {text.lower()} "
+        polish_markers = ("ą", "ć", "ę", "ł", "ń", "ó", "ś", "ź", "ż", " spółk", " wyniki ", " przychod", " zysk ")
+        if any(marker in lowered for marker in polish_markers):
+            from app.services.nlp_backends.heuristic import HeuristicNLPBackend
+            return HeuristicNLPBackend().classify_sentiment(title, body)
         try:
             pipe = self._load_finbert()
             results = pipe(text)[0]  # lista [{label, score}, ...]
@@ -261,11 +271,18 @@ class TransformerNLPBackend(NLPBackend):
         name_hits = text.count(name_l)
         if name_hits >= 1:
             entity_score += 0.45 + min(0.10, (name_hits - 1) * 0.04)
-        sym_hits = text.count(f" {sym_l} ") + text.count(f"({sym_l})")
+        sym_hits = len(re.findall(rf"(?<![\w]){re.escape(sym_l)}(?![\w])", text))
         if sym_hits >= 1:
             entity_score += 0.30 + min(0.05, (sym_hits - 1) * 0.02)
         if sector and sector.lower() in text:
             entity_score += 0.10
+        generic = {"stock", "stocks", "ucits", "fund", "global", "technologies", "company", "spółka", "akcje"}
+        subject_tokens = {
+            token for token in re.findall(r"[\wąćęłńóśźż]+", f"{asset_name} {sector or ''}".lower())
+            if len(token) >= 4 and token not in generic
+        }
+        subject_hits = sum(1 for token in subject_tokens if token in text)
+        entity_score += min(0.30, subject_hits * 0.10)
         entity_score = min(1.0, entity_score)
 
         # 2. Semantic similarity (waga 0.30)
@@ -289,12 +306,18 @@ class TransformerNLPBackend(NLPBackend):
         fin_score = min(1.0, fin_hits / 5.0)
 
         # Kara za bardzo krótkie teksty
-        length_penalty = 1.0 if len(text) >= 150 else max(0.5, len(text) / 150)
+        # RSS i komunikaty ESPI często mają tylko pełny tytuł. Nie karz mocno
+        # krótkiego tekstu, jeśli zawiera jednoznaczną nazwę lub ticker.
+        length_penalty = 1.0 if len(text) >= 80 else max(0.80, len(text) / 80)
 
         composite = (
             entity_score  * 0.55 +
             semantic_score * 0.30 +
             fin_score      * 0.15
         ) * length_penalty
+        if entity_score >= 0.70:
+            composite = max(composite, 0.50)
+        if sector and sector.upper().startswith("ETF") and subject_hits >= 2:
+            composite = max(composite, 0.42)
 
         return round(min(1.0, max(0.0, composite)), 4)

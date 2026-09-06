@@ -18,6 +18,7 @@ from app.db.models import (
 from app.db.session import Base
 from app.schemas.recommendation import AssetRecommendation
 from app.services.recommendation_audit import (
+    AUDIT_MODEL_VERSION,
     automatic_audit_status,
     run_automatic_audit_if_due,
     run_walk_forward_audit,
@@ -76,6 +77,8 @@ def test_walk_forward_has_untouched_blocks_and_embargo(tmp_path, monkeypatch):
         assert report["evaluated_rows"] > 0
         assert report["embargo_sessions"] == 20
         assert 0 <= report["calibration"]["ece"] <= 1
+        assert report["by_market_side"]
+        assert report["by_regime_side"]
         for fold in report["folds"]:
             train_end = datetime.fromisoformat(fold["train_end_exclusive"])
             test_start = datetime.fromisoformat(fold["test_start"])
@@ -88,7 +91,7 @@ def test_automatic_audit_waits_for_interval_and_new_outcomes(tmp_path, monkeypat
     now = datetime(2026, 7, 23, tzinfo=timezone.utc)
     with Session(engine) as db:
         audit = RecommendationAuditRunORM(
-            created_at=now - timedelta(days=2), model_version="walk_forward_v2",
+            created_at=now - timedelta(days=2), model_version=AUDIT_MODEL_VERSION,
             dataset_rows=100, eligible_rows=100, excluded_outliers=0,
             fold_count=3, embargo_sessions=20,
             result_json=json.dumps({"folds": [{"test_end": "2026-07-14"}]}),
@@ -320,23 +323,26 @@ def test_live_gate_blocks_unprofitable_or_too_small_segments(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'gate.db'}")
     Base.metadata.create_all(engine)
     report = {
-        "by_market": [
-            {"name": "USA", "trades": 100, "avg_net_return_pct": 1.0, "profit_factor": 1.5},
-            {"name": "OTHER", "trades": 100, "avg_net_return_pct": -0.2, "profit_factor": 0.9},
+        "by_market_side": [
+            {"name": "USA", "side": "BUY", "trades": 100, "avg_net_return_pct": 1.0, "profit_factor": 1.5, "win_rate_pct": 62.0},
+            {"name": "USA", "side": "SELL", "trades": 100, "avg_net_return_pct": -0.2, "profit_factor": 0.9, "win_rate_pct": 40.0},
+            {"name": "OTHER", "side": "BUY", "trades": 100, "avg_net_return_pct": -0.2, "profit_factor": 0.9, "win_rate_pct": 40.0},
         ],
-        "by_regime": [
-            {"name": "range_bound", "trades": 80, "avg_net_return_pct": 0.7, "profit_factor": 1.3},
-            {"name": "risk_on", "trades": 5, "avg_net_return_pct": 2.0, "profit_factor": 2.0},
+        "by_regime_side": [
+            {"name": "range_bound", "side": "BUY", "trades": 80, "avg_net_return_pct": 0.7, "profit_factor": 1.3, "win_rate_pct": 58.0},
+            {"name": "range_bound", "side": "SELL", "trades": 80, "avg_net_return_pct": -0.2, "profit_factor": 0.9, "win_rate_pct": 40.0},
+            {"name": "risk_on", "side": "BUY", "trades": 5, "avg_net_return_pct": 2.0, "profit_factor": 2.0, "win_rate_pct": 80.0},
         ],
     }
     with Session(engine) as db:
         db.add(RecommendationAuditRunORM(
-            created_at=datetime.now(timezone.utc), model_version="walk_forward_v2",
+            created_at=datetime.now(timezone.utc), model_version=AUDIT_MODEL_VERSION,
             dataset_rows=1000, eligible_rows=990, excluded_outliers=10,
             fold_count=3, embargo_sessions=20, result_json=json.dumps(report),
         ))
         db.commit()
 
-        assert _walk_forward_gate(db, "USA", "range_bound") == (True, None)
-        assert _walk_forward_gate(db, "OTHER", "range_bound")[0] is False
-        assert _walk_forward_gate(db, "USA", "risk_on")[0] is False
+        assert _walk_forward_gate(db, "USA", "range_bound", "BUY") == (True, None)
+        assert _walk_forward_gate(db, "USA", "range_bound", "SELL")[0] is False
+        assert _walk_forward_gate(db, "OTHER", "range_bound", "BUY")[0] is False
+        assert _walk_forward_gate(db, "USA", "risk_on", "BUY")[0] is False

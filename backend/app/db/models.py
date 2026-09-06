@@ -409,6 +409,10 @@ class PortfolioPositionORM(Base):
     asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), unique=True, index=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     avg_buy_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    purchase_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    invested_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # NULL oznacza rekord legacy zapisany w walucie aktywa. Nowe koszty są PLN.
+    cost_currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, default="PLN")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

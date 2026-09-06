@@ -295,8 +295,31 @@ def build_training_dataset(db: Session) -> MLDatasetBuildResponse:
     # Training rows are fully derived data. Rebuilding in one transaction avoids
     # leaving stale rows with an older feature schema (which could silently make
     # the trainer infer the old column list from its first row).
-    from sqlalchemy import delete as _delete
+    from sqlalchemy import delete as _delete, select
     from app.db.models import MLTrainingRowORM
+    # OOF meta-cechy są kosztownym, purged-CV artefaktem i nie mogą znikać przy
+    # zwykłym odświeżeniu bazowego datasetu. Zachowujemy je tylko wtedy, gdy
+    # deterministyczny wynik triple-barrier po przebudowie pozostaje identyczny.
+    preserved_oof = {
+        (row.asset_id, ensure_utc(row.snapshot_at).date()): {
+            "target_triple_barrier": row.target_triple_barrier,
+            "triple_barrier_return_pct": row.triple_barrier_return_pct,
+            "triple_barrier_hit": row.triple_barrier_hit,
+            "target_meta_label": row.target_meta_label,
+            "meta_side": row.meta_side,
+            "meta_strategy_return_pct": row.meta_strategy_return_pct,
+            "meta_primary_probability": row.meta_primary_probability,
+            "meta_primary_margin": row.meta_primary_margin,
+            "meta_model_disagreement": row.meta_model_disagreement,
+            "meta_label_source": row.meta_label_source,
+        }
+        for row in db.scalars(
+            select(MLTrainingRowORM).where(
+                MLTrainingRowORM.meta_label_source == "purged_oof_primary",
+                MLTrainingRowORM.meta_primary_probability.is_not(None),
+            )
+        ).all()
+    }
     db.execute(_delete(MLTrainingRowORM))
 
     built = 0
@@ -478,6 +501,30 @@ def build_training_dataset(db: Session) -> MLDatasetBuildResponse:
                     "meta_side": barrier.side,
                     "meta_strategy_return_pct": barrier.strategy_net_return_pct,
                 })
+                old_meta = preserved_oof.get((asset.id, snap_date))
+                same_return = (
+                    old_meta is not None
+                    and old_meta["triple_barrier_return_pct"] is not None
+                    and abs(
+                        float(old_meta["triple_barrier_return_pct"])
+                        - float(barrier.raw_return_pct)
+                    ) <= 1e-6
+                )
+                if (
+                    old_meta is not None
+                    and old_meta["target_triple_barrier"] == barrier.direction_label
+                    and old_meta["triple_barrier_hit"] == barrier.hit
+                    and same_return
+                ):
+                    targets.update({
+                        "target_meta_label": old_meta["target_meta_label"],
+                        "meta_side": old_meta["meta_side"],
+                        "meta_strategy_return_pct": old_meta["meta_strategy_return_pct"],
+                        "meta_primary_probability": old_meta["meta_primary_probability"],
+                        "meta_primary_margin": old_meta["meta_primary_margin"],
+                        "meta_model_disagreement": old_meta["meta_model_disagreement"],
+                        "meta_label_source": "purged_oof_primary",
+                    })
 
             delete_training_row_for_timestamp(db, asset.id, feat.snapshot_at)
             insert_training_row(
@@ -558,7 +605,16 @@ def status(db: Session) -> MLStatusResponse:
         decisions = [activation_by_run[run.id] for run in active_runs if run.id in activation_by_run]
         eligible_count = sum(decision.eligible for decision in decisions)
         degraded_count = sum(decision.state == "degraded" for decision in decisions)
-        shadow_count = len(decisions) - eligible_count - degraded_count
+        # target_thesis_success jest celem diagnostycznym i celowo nie wchodzi
+        # do globalnej bramki live. Nadal pokazujemy go jako shadow w szczegółach.
+        shadow_count = (
+            len(decisions) - eligible_count - degraded_count
+            if decisions else len(active_runs)
+        )
+        outcome_samples = max(
+            (decision.sample_size for decision in decisions),
+            default=0,
+        )
         target_state = (
             "eligible" if eligible_count and eligible_count == len(decisions)
             else "partial" if eligible_count
@@ -574,6 +630,8 @@ def status(db: Session) -> MLStatusResponse:
             dataset_rows=labeled,
             active_models=len(active_runs), eligible_models=eligible_count,
             shadow_models=shadow_count, degraded_models=degraded_count,
+            outcome_samples=outcome_samples,
+            min_outcome_samples=settings.ml_monitor_min_outcomes,
             activation_state=target_state,
         ))
 
@@ -591,6 +649,8 @@ def status(db: Session) -> MLStatusResponse:
         eligible_models=activation["eligible_models"],
         shadow_models=activation["shadow_models"],
         degraded_models=activation["degraded_models"],
+        outcome_samples=activation["outcome_samples"],
+        min_outcome_samples=activation["min_outcome_samples"],
         targets=target_states,
     )
 

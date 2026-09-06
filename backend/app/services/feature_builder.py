@@ -7,18 +7,18 @@ from app.utils.datetime import ensure_utc, now_utc
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.models import AssetORM
-from app.mappers import asset_to_schema, news_to_schema, price_to_schema
-from app.repositories.features import delete_feature_snapshot_for_timestamp, insert_feature_snapshot
+from app.mappers import asset_to_schema, feature_to_schema, price_to_schema
+from app.repositories.features import insert_feature_snapshot
 from app.repositories.forecasts import delete_forecast_for_timestamp, insert_forecast
-from app.repositories.news import list_news
 from app.repositories.prices import list_prices
 from app.schemas.features import DailyAssetFeatureSnapshot
 from app.services.analytics import build_overview, pct_change
 from app.repositories.assets import list_assets
-from app.utils.datetime import ensure_utc
 from app.services.forecasting import build_forecasts
 from app.services.thesis_history import persist_thesis_snapshot
+from app.services.news_features import list_news_for_analysis
 
 
 
@@ -51,6 +51,15 @@ def _news_count_7d(news, at: datetime | None = None) -> int:
     )
 
 
+def _range_rank(current: float, history: list[float]) -> float:
+    """Pozycja w historycznym zakresie ograniczona do poprawnego 0-100."""
+    value_min, value_max = min(history), max(history)
+    if value_max == value_min:
+        return 50.0
+    raw = (current - value_min) / (value_max - value_min) * 100
+    return round(max(0.0, min(100.0, raw)), 1)
+
+
 def _calc_iv_rank(db: Session, asset_id: str, current_iv: float | None) -> float | None:
     """Percentyl bieżącego IV w ostatnich 252 dniach (0-100). None gdy < 30 obserwacji."""
     if current_iv is None:
@@ -66,26 +75,103 @@ def _calc_iv_rank(db: Session, asset_id: str, current_iv: float | None) -> float
     ).all()
     if len(ivs) < 30:
         return None
-    iv_min, iv_max = min(ivs), max(ivs)
-    if iv_max == iv_min:
-        return 50.0
-    return round((current_iv - iv_min) / (iv_max - iv_min) * 100, 1)
+    return _range_rank(current_iv, list(ivs))
+
+
+def _remove_incomplete_daily_derivatives(
+    db: Session,
+    asset_id: str,
+    incomplete_timestamps: list[datetime],
+) -> int:
+    """Remove derived records that were built from still-open daily bars."""
+    if not incomplete_timestamps:
+        return 0
+    from sqlalchemy import delete, func, select
+    from app.db.models import (
+        DailyAssetFeatureORM,
+        DecisionSnapshotORM,
+        ForecastORM,
+        MLPredictionORM,
+        MLTrainingRowORM,
+        ThesisORM,
+        ThesisOutcomeORM,
+    )
+
+    days = sorted({ensure_utc(value).date() for value in incomplete_timestamps})
+    thesis_ids = select(ThesisORM.id).where(
+        ThesisORM.asset_id == asset_id,
+        func.date(ThesisORM.source_snapshot_at).in_(days),
+    )
+    db.execute(delete(ThesisOutcomeORM).where(ThesisOutcomeORM.thesis_id.in_(thesis_ids)))
+    models = (DailyAssetFeatureORM, DecisionSnapshotORM, ForecastORM, MLPredictionORM, MLTrainingRowORM)
+    timestamp_fields = (
+        DailyAssetFeatureORM.snapshot_at,
+        DecisionSnapshotORM.snapshot_at,
+        ForecastORM.generated_at,
+        MLPredictionORM.snapshot_at,
+        MLTrainingRowORM.snapshot_at,
+    )
+    removed = 0
+    for model, field in zip(models, timestamp_fields):
+        result = db.execute(delete(model).where(
+            model.asset_id == asset_id,
+            func.date(field).in_(days),
+        ))
+        removed += int(result.rowcount or 0)
+    result = db.execute(delete(ThesisORM).where(
+        ThesisORM.asset_id == asset_id,
+        func.date(ThesisORM.source_snapshot_at).in_(days),
+    ))
+    removed += int(result.rowcount or 0)
+    return removed
 
 
 def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> DailyAssetFeatureSnapshot | None:
     asset = asset_to_schema(asset_row)
-    prices = [price_to_schema(row) for row in list_prices(db, asset.id)]
-    news = [news_to_schema(row) for row in list_news(db, asset.id)]
+    all_prices = [price_to_schema(row) for row in list_prices(db, asset.id)]
+    from app.services.market_calendar import (
+        is_daily_bar_complete,
+        market_session_close,
+        market_session_date,
+    )
+    price_symbol = asset_row.price_symbol or asset.symbol
+    prices = [point for point in all_prices if is_daily_bar_complete(price_symbol, point.timestamp)]
+    incomplete = [point.timestamp for point in all_prices if not is_daily_bar_complete(price_symbol, point.timestamp)]
+    cleaned = _remove_incomplete_daily_derivatives(db, asset.id, incomplete)
     if len(prices) < 21:
+        if cleaned:
+            db.commit()
         return None
 
-    overview = build_overview(asset, prices, news)
     snapshot_at = prices[-1].timestamp
+    from sqlalchemy import func as _func, select as _sel
+    from app.db.models import DailyAssetFeatureORM
+    existing = db.scalar(
+        _sel(DailyAssetFeatureORM).where(
+            DailyAssetFeatureORM.asset_id == asset.id,
+            _func.date(DailyAssetFeatureORM.snapshot_at) == ensure_utc(snapshot_at).date(),
+        ).order_by(DailyAssetFeatureORM.id.desc()).limit(1)
+    )
+    # A completed daily snapshot is immutable. Current prices/news belong to
+    # intraday until the next exchange close.
+    if existing is not None:
+        if cleaned:
+            db.commit()
+        return feature_to_schema(existing)
+
+    session_day = market_session_date(price_symbol, snapshot_at)
+    session_close = ensure_utc(market_session_close(price_symbol, session_day))
+    news = list_news_for_analysis(
+        db,
+        asset.id,
+        as_of=session_close,
+        lookback_days=settings.news_analysis_lookback_days,
+    )
+    overview = build_overview(asset, prices, news)
 
     # Dane opcyjne — tylko dla bieżącego snapshotu (historyczne IV niedostępne za darmo)
     from app.services.providers import fetch_options_data
-    options_symbol = asset_row.price_symbol or asset.symbol
-    from app.core.config import settings
+    options_symbol = price_symbol
     opts = {} if settings.testing else fetch_options_data(options_symbol)
     iv = opts.get("implied_volatility")
     pc = opts.get("put_call_ratio")
@@ -114,23 +200,7 @@ def rebuild_asset_features_and_forecasts(db: Session, asset_row: AssetORM) -> Da
         iv_rank=iv_r,
     )
 
-    # Zachowuj historię: insertuj tylko jeśli nie ma jeszcze snapshotu dla tej daty.
-    # To pozwala budować dataset ML z wielu dni, a nie tylko z bieżącego.
-    from sqlalchemy import select as _sel, func as _func
-    from app.db.models import DailyAssetFeatureORM
-    snap_date = snapshot_at.date() if hasattr(snapshot_at, "date") else snapshot_at
-    existing_count = db.scalar(
-        _sel(_func.count()).select_from(DailyAssetFeatureORM).where(
-            DailyAssetFeatureORM.asset_id == asset.id,
-            _func.date(DailyAssetFeatureORM.snapshot_at) == snap_date,
-        )
-    ) or 0
-    if existing_count == 0:
-        insert_feature_snapshot(db, snapshot)
-    else:
-        # Aktualizuj istniejący (ceny i sentyment mogą się zmienić w ciągu dnia)
-        delete_feature_snapshot_for_timestamp(db, asset.id, snapshot_at)
-        insert_feature_snapshot(db, snapshot)
+    insert_feature_snapshot(db, snapshot)
 
     delete_forecast_for_timestamp(db, asset.id, snapshot_at)
     for forecast in build_forecasts(snapshot):
@@ -175,7 +245,6 @@ def backfill_feature_history(db: Session, asset_row: AssetORM, days_back: int = 
 
     asset = asset_to_schema(asset_row)
     all_prices = [price_to_schema(row) for row in list_prices(db, asset.id)]
-    news = [news_to_schema(row) for row in list_news(db, asset.id)]
 
     if len(all_prices) < 21:
         return 0
@@ -208,7 +277,12 @@ def backfill_feature_history(db: Session, asset_row: AssetORM, days_back: int = 
         window = all_prices_sorted[:i + 1]
         # Okno newsów do tego dnia (newsów mogło nie być — to OK)
         snap_ts = ensure_utc(snap_price.timestamp)
-        news_window = [n for n in news if ensure_utc(n.published_at) <= snap_ts]
+        news_window = list_news_for_analysis(
+            db,
+            asset.id,
+            as_of=snap_ts,
+            lookback_days=settings.news_analysis_lookback_days,
+        )
 
         try:
             overview = build_overview(asset, window, news_window)

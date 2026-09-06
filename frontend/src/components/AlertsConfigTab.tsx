@@ -116,6 +116,7 @@ export function AlertsConfigTab() {
       await api.saveSmsAlertConfig({
         alert_rules: draft.alert_rules,
         top_picks_sms: draft.top_picks_sms,
+        paper_trading_sms: draft.paper_trading_sms,
         portfolio_sell_urgent: draft.portfolio_sell_urgent,
         premarket_gap: draft.premarket_gap,
       });
@@ -156,7 +157,7 @@ export function AlertsConfigTab() {
     });
   };
 
-  const setSection = <K extends "top_picks_sms" | "portfolio_sell_urgent" | "premarket_gap">(
+  const setSection = <K extends "top_picks_sms" | "paper_trading_sms" | "portfolio_sell_urgent" | "premarket_gap">(
     section: K,
     field: string,
     value: unknown,
@@ -169,6 +170,7 @@ export function AlertsConfigTab() {
 
   const hasChanges = JSON.stringify(draft?.alert_rules) !== JSON.stringify(cfg?.alert_rules)
     || JSON.stringify(draft?.top_picks_sms) !== JSON.stringify(cfg?.top_picks_sms)
+    || JSON.stringify(draft?.paper_trading_sms) !== JSON.stringify(cfg?.paper_trading_sms)
     || JSON.stringify(draft?.portfolio_sell_urgent) !== JSON.stringify(cfg?.portfolio_sell_urgent)
     || JSON.stringify(draft?.premarket_gap) !== JSON.stringify(cfg?.premarket_gap);
 
@@ -294,6 +296,15 @@ export function AlertsConfigTab() {
               <div style={S.desc}>Wysyła SMS gdy nowe aktywo pojawi się w zakładce Top Picks.</div>
             </div>
             <Toggle value={draft.top_picks_sms.enabled} onChange={v => setSection("top_picks_sms", "enabled", v)} />
+          </div>
+
+          {/* Paper trading */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: "var(--text-1)", fontSize: 13, fontWeight: 600 }}>SMS: transakcje paper tradingu</div>
+              <div style={S.desc}>Wysyła SMS po każdej wykonanej wirtualnej transakcji KUP lub SPRZEDAJ. Odrzucone zlecenia są pomijane.</div>
+            </div>
+            <Toggle value={draft.paper_trading_sms.enabled} onChange={v => setSection("paper_trading_sms", "enabled", v)} />
           </div>
 
           {/* Portfolio sell urgent */}

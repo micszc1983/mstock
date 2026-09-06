@@ -21,6 +21,13 @@ _backend_instance: Optional[NLPBackend] = None
 def _create_backend() -> NLPBackend:
     mode = os.getenv("NLP_BACKEND", "auto").lower().strip()
 
+    # Testy integracyjne nie powinny pobierać modeli ani zależeć od ich cache.
+    if mode == "auto":
+        from app.core.config import settings
+        if settings.testing:
+            from app.services.nlp_backends.heuristic import HeuristicNLPBackend
+            return HeuristicNLPBackend()
+
     if mode == "heuristic":
         from app.services.nlp_backends.heuristic import HeuristicNLPBackend
         print("[NLP] Tryb: heuristic (ustawiony w NLP_BACKEND)")

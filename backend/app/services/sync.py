@@ -21,6 +21,7 @@ from app.services.providers import (
     fetch_stock_prices_from_rapidapi,
     fetch_gpw_prices_from_rapidapi,
     fetch_prices_from_yahoo,
+    fetch_prices_from_yfinance,
     fetch_stock_prices_from_twelvedata,
     fetch_company_news_from_finnhub,
     fetch_company_news_from_finnhub_range,
@@ -78,6 +79,32 @@ def _is_gpw_asset(asset: AssetORM, symbol: str) -> bool:
     return (asset.currency or "").upper() == "PLN" or symbol.upper().endswith((".WA", ".WAW", ".WAR"))
 
 
+def _is_international_symbol(symbol: str) -> bool:
+    """Notowanie spoza USA, które wymaga symbolu giełdy u providera."""
+    upper = symbol.upper()
+    return upper.endswith((".L", ".SW", ".DE", ".PA", ".MI", ".AS"))
+
+
+def _news_search_terms(asset: AssetORM, configured: str) -> list[str]:
+    """Build precise aliases; ``|`` in assets.json separates query variants."""
+    candidates = [*configured.split("|"), asset.name]
+    symbol = (asset.symbol or "").upper().split(".", 1)[0]
+    # Short tickers are useful in RSS only as whole words (handled by provider).
+    if symbol:
+        candidates.append(symbol)
+    result: list[str] = []
+    for value in candidates:
+        clean = value.strip()
+        if clean and clean.casefold() not in {item.casefold() for item in result}:
+            result.append(clean)
+    return result[:6]
+
+
+def _merge_news(primary: list, extra: list) -> list:
+    existing_ids = {item.id for item in primary}
+    return primary + [item for item in extra if item.id not in existing_ids]
+
+
 
 def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
     # Czytaj config z kolumn w AssetORM (nowe podejście — konfiguracja w DB)
@@ -95,6 +122,7 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         points: list = []
         provider = "unknown"
         is_gpw = _is_gpw_asset(asset, symbol)
+        is_international = not is_gpw and _is_international_symbol(symbol)
 
         # ── GPW: EODHD → Yahoo → opcjonalne RapidAPI ────────────────────────
         if is_gpw:
@@ -160,6 +188,33 @@ def sync_prices_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
                     print(f"[sync] {asset.id}: RapidAPI Yahoo Finance OK — {len(points)} punktów")
                 except Exception as rapi_err:
                     log_sync_error(db, asset.id, "prices_rapidapi_fallback", _safe_provider_error(rapi_err))
+                    points = []
+
+        # ── Pozostałe giełdy (np. LSE): yfinance → surowe Yahoo ─────────
+        elif is_international:
+            try:
+                provider = "yfinance:history"
+                points = fetch_prices_from_yfinance(symbol)
+                if not points:
+                    raise ValueError("yfinance zwróciło 0 punktów")
+            except Exception as yfinance_err:
+                log_sync_error(
+                    db, asset.id, "prices_yfinance_fallback",
+                    _safe_provider_error(yfinance_err),
+                )
+                points = []
+
+            if not points:
+                try:
+                    provider = "yahoo:v8"
+                    points = fetch_prices_from_yahoo(symbol)
+                    if not points:
+                        raise ValueError("Yahoo Finance zwróciło 0 punktów")
+                except Exception as yahoo_err:
+                    log_sync_error(
+                        db, asset.id, "prices_yahoo_fallback",
+                        _safe_provider_error(yahoo_err),
+                    )
                     points = []
 
         # ── US stocks: Massive → Twelvedata → RapidAPI → AV → Finnhub ─
@@ -282,6 +337,10 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
 
     news_sym = asset.news_symbol or legacy.get("news_symbol")
     term = asset.news_term or legacy.get("news_term") or asset.name
+    terms = _news_search_terms(asset, term)
+    price_symbol = asset.price_symbol or legacy.get("price_symbol") or asset.symbol
+    is_gpw = _is_gpw_asset(asset, price_symbol)
+    is_us_listed = not is_gpw and not _is_international_symbol(price_symbol)
 
     # Testy integracyjne muszą być całkowicie deterministyczne i nie mogą
     # przypadkiem używać prawdziwych kluczy z backend/.env.
@@ -293,21 +352,28 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
             provider = "alphavantage:NEWS_SENTIMENT:test"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
-    elif asset.type == AssetType.STOCK.value and news_sym and settings.finnhub_api_key:
+    elif asset.type == AssetType.STOCK.value and (news_sym or is_us_listed) and settings.finnhub_api_key:
         # US stocks z news_symbol — Finnhub company-news (najlepsze źródło dla US)
         provider = "finnhub:company-news"
-        items = fetch_company_news_from_finnhub(news_sym, asset.id, asset_type)
+        items = fetch_company_news_from_finnhub(news_sym or asset.symbol, asset.id, asset_type)
+        # ETF-y i mniej popularne tickery mają mało company-news. Zapytanie
+        # tematyczne uzupełnia je, ale deduplikacja odrzuci powtórzenia.
+        if settings.newsapi_api_key and (asset.sector or "").upper().startswith("ETF"):
+            items = _merge_news(
+                items,
+                fetch_news_from_newsapi(terms, asset.id, asset_type, language="en"),
+            )
+            provider = "finnhub:company-news+newsapi"
 
-    elif asset.type == AssetType.STOCK.value and not news_sym:
-        # GPW i inne spółki bez news_symbol
+    elif asset.type == AssetType.STOCK.value and is_gpw:
+        # GPW: polskie źródła RSS, w tym raporty emitentów PAP/ESPI/EBI.
         # 1. RSS (Bankier, StockWatch, PB) — bez limitu, po polsku
         provider = "rss:gpw"
-        items = fetch_gpw_news_from_rss(term, asset.id, asset_type)
+        items = fetch_gpw_news_from_rss(terms, asset.id, asset_type)
         # 2. NewsAPI — bardziej globalne newsy (EN), 100 req/dzień
         if settings.newsapi_api_key:
-            newsapi_items = fetch_news_from_newsapi(term, asset.id, asset_type)
-            existing_ids = {i.id for i in items}
-            items += [i for i in newsapi_items if i.id not in existing_ids]
+            newsapi_items = fetch_news_from_newsapi(terms, asset.id, asset_type, language="pl")
+            items = _merge_news(items, newsapi_items)
             if newsapi_items:
                 provider = "rss:gpw+newsapi"
         # 3. Finnhub general search — fallback (słabe dla GPW, ale coś)
@@ -325,9 +391,8 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
         provider = "rss:commodity"
         items = fetch_commodity_news_from_rss(term, asset.id, asset_type)
         if settings.newsapi_api_key:
-            newsapi_items = fetch_news_from_newsapi(term, asset.id, asset_type)
-            existing_ids = {i.id for i in items}
-            items += [i for i in newsapi_items if i.id not in existing_ids]
+            newsapi_items = fetch_news_from_newsapi(terms, asset.id, asset_type, language="en")
+            items = _merge_news(items, newsapi_items)
             if newsapi_items:
                 provider = "rss:commodity+newsapi"
         if not items and (settings.alphavantage_news_fallback_enabled or settings.testing):
@@ -335,11 +400,11 @@ def sync_news_for_asset(db: Session, asset: AssetORM) -> SyncResponse:
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
 
     else:
-        # US stocks bez news_sym, inne typy — NewsAPI → Alpha Vantage
+        # ETF-y z giełd europejskich i inne instrumenty bez Finnhub symbol.
         items = []
         if settings.newsapi_api_key:
             provider = "newsapi"
-            items = fetch_news_from_newsapi(term, asset.id, asset_type)
+            items = fetch_news_from_newsapi(terms, asset.id, asset_type, language=None)
         if not items and (settings.alphavantage_news_fallback_enabled or settings.testing):
             provider = "alphavantage:NEWS_SENTIMENT"
             items = fetch_search_news_from_alpha_vantage(term, asset.id, asset_type)
@@ -359,6 +424,10 @@ def log_sync_success(db: Session, asset_id: str, sync_type: str, result: SyncRes
 
 
 def log_sync_error(db: Session, asset_id: str, sync_type: str, detail: str) -> None:
+    # Po błędzie flush/commit sesja jest w stanie pending rollback i nie
+    # przyjmie nawet wpisu diagnostycznego. Odtwórz ją przed zapisem logu.
+    if not db.is_active:
+        db.rollback()
     add_sync_log(db, asset_id, sync_type, "manual", 0, 0, "error", _safe_provider_error(detail))
     db.commit()
 

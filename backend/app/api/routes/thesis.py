@@ -4,9 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.mappers import asset_to_schema, news_to_schema, price_to_schema, thesis_outcome_to_schema, thesis_to_schema
+from app.mappers import asset_to_schema, price_to_schema, thesis_outcome_to_schema, thesis_to_schema
 from app.repositories.assets import get_asset
-from app.repositories.news import list_news
 from app.repositories.prices import list_prices
 from app.repositories.outcomes import list_outcomes_for_asset, list_outcomes_for_thesis
 from app.repositories.theses import get_latest_thesis, list_thesis_history
@@ -16,6 +15,7 @@ from app.schemas.thesis import BreakMonitorResponse, StoredThesisResponse, Thesi
 from app.services.analytics import build_break_monitor, build_narrative_history, make_thesis
 from app.services.feature_builder import rebuild_asset_features_and_forecasts
 from app.services.outcome_evaluator import evaluate_asset_outcomes, evaluate_thesis_outcomes
+from app.services.news_features import list_news_for_analysis
 
 router = APIRouter(tags=["thesis"])
 
@@ -26,7 +26,7 @@ def _load_asset_bundle(db: Session, asset_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown asset: {asset_id}")
     asset = asset_to_schema(row)
     prices = [price_to_schema(p) for p in list_prices(db, asset_id)]
-    news = [news_to_schema(n) for n in list_news(db, asset_id)]
+    news = list_news_for_analysis(db, asset_id)
     return row, asset, prices, news
 
 

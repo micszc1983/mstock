@@ -18,6 +18,41 @@ from app.utils.datetime import ensure_utc, now_utc
 MAX_ALLOCATION_BUCKETS = 20
 
 
+def _notify_filled_trade(
+    order: PaperOrderORM,
+    account: PaperAccountORM,
+    asset: AssetORM,
+    *,
+    gross: float,
+    realized: float,
+) -> bool:
+    """Send one best-effort SMS after a paper trade has been committed."""
+    if settings.testing or not settings.sms_enabled:
+        return False
+    try:
+        from app.services.sms_alert_config import get_section
+        from app.services.sms_service import send_sms
+
+        if not get_section("paper_trading_sms").get("enabled", True):
+            return False
+        side = "KUP" if order.side == "buy" else "SPRZEDAJ"
+        symbol = (asset.symbol or asset.id).upper()
+        costs = float(order.commission or 0) + float(order.slippage or 0)
+        result = f"; wynik {realized:+.2f}" if order.side == "sell" else ""
+        message = (
+            f"MStock PAPER {side} {symbol}: {order.quantity:g} szt po "
+            f"{float(order.fill_price or 0):.2f} {account.currency}; "
+            f"wartosc {gross:.2f}; koszty {costs:.2f}{result}; "
+            f"konto {account.name[:24]}; ID {order.id}"
+        )
+        return send_sms(message)
+    except Exception as exc:
+        # Powiadomienie nie może cofnąć ani oznaczyć jako nieudaną już
+        # zaksięgowaną transakcję paper tradingu.
+        print(f"[paper-trading] Błąd SMS dla zlecenia #{order.id}: {exc}")
+        return False
+
+
 def _validated_reference_price(db: Session, asset_id: str) -> float:
     recent = db.scalars(
         select(PricePointORM)
@@ -223,6 +258,7 @@ def place_market_order(db: Session, account_id: int, asset_id: str, side: str, q
         quantity=quantity, price=fill, gross_value=gross, costs=commission + order.slippage,
         realized_pnl=realized, executed_at=now))
     db.commit(); db.refresh(order)
+    _notify_filled_trade(order, account, asset, gross=gross, realized=realized)
     return order
 
 

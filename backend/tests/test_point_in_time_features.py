@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    AssetORM, EarningsORM, InsiderTradeORM, NewsItemORM, ShortInterestORM,
+    AssetORM, EarningsORM, InsiderTradeORM, NewsItemORM, NewsNLPRunORM, ShortInterestORM,
 )
 from app.db.session import Base
 
@@ -53,6 +53,18 @@ def test_point_in_time_features_respect_publication_boundaries(tmp_path):
                 id="future", asset_id="abc", published_at=datetime(2025, 1, 15, 9, tzinfo=utc),
                 source="wire", title="Regulator starts investigation", body="",
                 sentiment_score=-0.9, impact_score=0.9,
+            ),
+        ])
+        db.add_all([
+            NewsNLPRunORM(
+                news_id="known", model_name="test-nlp", processed_at=datetime(2025, 1, 14, 10, tzinfo=utc),
+                sentiment_score=0.8, sentiment_label="positive", sentiment_confidence=0.9,
+                relevance_score=0.9, raw_output_json="{}",
+            ),
+            NewsNLPRunORM(
+                news_id="future", model_name="test-nlp", processed_at=datetime(2025, 1, 15, 10, tzinfo=utc),
+                sentiment_score=-0.9, sentiment_label="negative", sentiment_confidence=0.9,
+                relevance_score=0.9, raw_output_json="{}",
             ),
         ])
         db.commit()

@@ -291,6 +291,43 @@ def test_gpw_sync_prefers_eodhd_and_crosschecks_yahoo(tmp_path, monkeypatch):
         assert "crosscheck_median_deviation=0.000%" in result.detail
 
 
+def test_lse_etf_sync_uses_exchange_symbol_and_yfinance(tmp_path, monkeypatch):
+    TestingSessionLocal = build_test_session(tmp_path)
+    from app.services import sync as sync_service
+
+    point = PricePoint(
+        timestamp=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        open=39.0, high=40.0, low=38.5, close=39.7, volume=25000.0,
+    )
+    calls = []
+    monkeypatch.setattr(
+        sync_service,
+        "fetch_prices_from_yfinance",
+        lambda symbol: calls.append(symbol) or [point],
+    )
+    monkeypatch.setattr(
+        sync_service,
+        "fetch_stock_prices_from_massive",
+        lambda _symbol: (_ for _ in ()).throw(
+            AssertionError("Provider wyłącznie US nie powinien obsługiwać symbolu LSE")
+        ),
+    )
+
+    with TestingSessionLocal() as db:
+        db.add(AssetORM(
+            id="wdef", symbol="WDEF", name="WisdomTree Europe Defence ETF",
+            type="stock", currency="USD", sector="ETF / European Defence",
+            price_symbol="EUDF.L",
+        ))
+        db.commit()
+
+        result = sync_prices_for_asset(db, db.get(AssetORM, "wdef"))
+
+        assert result.provider == "yfinance:history"
+        assert result.inserted == 1
+        assert calls == ["EUDF.L"]
+
+
 def test_crosscheck_rejects_systematically_divergent_primary():
     from app.services.sync import _crosscheck_closes
 

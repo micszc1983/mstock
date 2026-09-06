@@ -75,6 +75,38 @@ def test_paper_trading_persists_order_trade_and_position(tmp_path):
         assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 2
 
 
+def test_filled_paper_trade_sends_sms_but_rejected_order_does_not(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'paper-sms.db'}")
+    Base.metadata.create_all(engine)
+    messages = []
+    monkeypatch.setattr("app.services.paper_trading.settings.testing", False)
+    monkeypatch.setattr("app.services.paper_trading.settings.sms_enabled", True)
+    monkeypatch.setattr("app.services.sms_service.send_sms", lambda message: messages.append(message) or True)
+    monkeypatch.setattr(
+        "app.services.sms_alert_config.get_section",
+        lambda _section: {"enabled": True},
+    )
+    with Session(engine) as db:
+        db.add(AssetORM(id="abc", symbol="ABC", name="ABC", type="stock", currency="USD"))
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(30):
+            db.add(PricePointORM(asset_id="abc", timestamp=start + timedelta(days=i),
+                open=100+i, high=101+i, low=99+i, close=100+i, volume=1000))
+        db.commit()
+        account = get_or_create_account(db, name="sms-test", initial_cash=2_000)
+        db.commit()
+
+        filled = place_market_order(db, account.id, "abc", "buy", 1)
+        rejected = place_market_order(db, account.id, "abc", "buy", 100)
+
+        assert filled.status == "filled"
+        assert rejected.status == "rejected"
+        assert len(messages) == 1
+        assert "PAPER KUP ABC" in messages[0]
+        assert "USD" in messages[0]
+        assert f"ID {filled.id}" in messages[0]
+
+
 def test_paper_trading_allocates_cash_buckets_to_distinct_buy_recommendations(tmp_path, monkeypatch):
     _allow_immediate_strategy_entries(monkeypatch)
     engine = create_engine(f"sqlite:///{tmp_path / 'allocation.db'}")
@@ -220,6 +252,65 @@ def test_background_strategy_sells_and_reinvests_bucket(tmp_path, monkeypatch):
         assert bucket.quantity > 0
         assert db.scalar(select(func.count()).select_from(PaperOrderORM)) == 3
         assert db.scalar(select(func.count()).select_from(PaperTradeORM)) == 3
+
+
+def test_active_pln_and_usd_strategies_run_in_parallel_without_mixing_assets(tmp_path, monkeypatch):
+    _allow_immediate_strategy_entries(monkeypatch)
+    engine = create_engine(f"sqlite:///{tmp_path / 'parallel-currencies.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for asset_id, symbol, asset_type, currency in (
+            ("gpw", "GPW", "stock", "PLN"),
+            ("world-etf", "ETF", "etf", "USD"),
+        ):
+            db.add(AssetORM(
+                id=asset_id, symbol=symbol, name=symbol,
+                type=asset_type, currency=currency,
+            ))
+            for i in range(30):
+                db.add(PricePointORM(
+                    asset_id=asset_id,
+                    timestamp=start + timedelta(days=i),
+                    open=100 + i, high=101 + i, low=99 + i,
+                    close=100 + i, volume=1000,
+                ))
+        db.commit()
+
+        recommendations = []
+        monkeypatch.setattr(
+            "app.services.recommendation_engine.build_all_recommendations",
+            lambda _db: recommendations,
+        )
+        pln = get_or_create_account(
+            db, name="paper-pln", initial_cash=2000, currency="PLN",
+        )
+        usd = get_or_create_account(
+            db, name="paper-usd", initial_cash=2000, currency="USD",
+        )
+        db.commit()
+        allocate_recommended_amounts(db, pln.id, [1000])
+        allocate_recommended_amounts(db, usd.id, [1000])
+
+        def recommendation(asset_id, market):
+            return SimpleNamespace(
+                asset_id=asset_id, symbol=asset_id.upper(), name=asset_id,
+                recommendation="KUP", data_complete=True,
+                has_critical_alert=False, expected_net_edge_pct=2.0,
+                uncertainty_pct=0.5, composite_score=70.0, confidence=75.0,
+                transaction_cost_pct=0.2, market_segment=market, regime="bull",
+            )
+
+        recommendations.extend([
+            recommendation("gpw", "GPW"),
+            recommendation("world-etf", "USA"),
+        ])
+        results = run_active_paper_strategies(db)
+
+        assert len(results) == 2
+        assert {row["buys"][0]["asset_id"] for row in results} == {"gpw", "world-etf"}
+        assert [row["asset_id"] for row in account_snapshot(db, pln.id)["positions"]] == ["gpw"]
+        assert [row["asset_id"] for row in account_snapshot(db, usd.id)["positions"]] == ["world-etf"]
 
 
 def test_paper_strategy_requires_two_matching_closed_session_signals(tmp_path, monkeypatch):

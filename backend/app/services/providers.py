@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import re
 from typing import Dict, List
 
 import httpx
@@ -270,7 +272,7 @@ def fetch_search_news_from_alpha_vantage(term: str, asset_id: str, asset_type: A
         sentiment_score = clamp(float(overall_sentiment), -1.0, 1.0) if overall_sentiment is not None else infer_sentiment_from_text(title, body)
         items.append(
             NewsItem(
-                id=f"av-news-{asset_id}-{hash(str(entry.get('url', title)))}",
+                id=f"av-news-{asset_id}-{_stable_news_id(str(entry.get('url') or title))}",
                 asset_id=asset_id,
                 published_at=published_at,
                 source=str(entry.get("source") or "AlphaVantage"),
@@ -371,7 +373,7 @@ def fetch_search_news_from_alpha_vantage_range(
                 else infer_sentiment_from_text(title, body)
             )
             items.append(NewsItem(
-                id=f"av-news-{asset_id}-{hash(str(entry.get('url', title)))}",
+                id=f"av-news-{asset_id}-{_stable_news_id(str(entry.get('url') or title))}",
                 asset_id=asset_id,
                 published_at=published_at,
                 source=str(entry.get("source") or "AlphaVantage"),
@@ -835,6 +837,49 @@ def fetch_prices_from_yahoo(ticker: str) -> List[PricePoint]:
     return points
 
 
+def fetch_prices_from_yfinance(ticker: str) -> List[PricePoint]:
+    """Pobiera do 5 lat dziennych OHLCV przez klienta yfinance.
+
+    Jest używane dla notowań spoza USA/GPW (np. LSE), których providery
+    Massive i Twelve Data w obecnej konfiguracji nie obsługują. Klient
+    yfinance ma własną obsługę sesji/cookies i jest odporniejszy na okresowe
+    odpowiedzi 429 surowego endpointu Yahoo.
+    """
+    import yfinance as yf
+
+    history = yf.Ticker(ticker.upper()).history(
+        period="5y",
+        interval="1d",
+        auto_adjust=False,
+        actions=False,
+    )
+    if history is None or history.empty:
+        raise ValueError(f"yfinance: brak danych dla {ticker}")
+
+    points: List[PricePoint] = []
+    for timestamp, row in history.iterrows():
+        try:
+            close = float(row["Close"])
+            if close <= 0:
+                continue
+            day = timestamp.date()
+            points.append(PricePoint(
+                timestamp=datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc),
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=close,
+                volume=float(row.get("Volume", 0) or 0),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not points:
+        raise ValueError(f"yfinance: sparsowano 0 wierszy dla {ticker}")
+    points.sort(key=lambda point: point.timestamp)
+    return points
+
+
 # Alias pozostawiony dla kompatybilności integracji importujących starą,
 # mylącą nazwę. Implementacja zawsze korzystała z Yahoo, nie ze Stooq.
 fetch_gpw_prices_from_stooq = fetch_prices_from_yahoo
@@ -846,9 +891,11 @@ fetch_gpw_prices_from_stooq = fetch_prices_from_yahoo
 # ══════════════════════════════════════════════════════════════════
 
 _GPW_RSS_FEEDS = [
+    # Raporty emitentów ESPI/EBI udostępniane przez Bankier/Parkiet.
+    "https://www.bankier.pl/rss/espi.xml",
+    "https://www.bankier.pl/rss/gielda.xml",
     "https://www.bankier.pl/rss/wiadomosci.xml",
-    "https://stockwatch.pl/rss/",
-    "https://www.pb.pl/rss.xml",
+    "https://www.parkiet.com/rss_main",
 ]
 
 _COMMODITY_RSS_FEEDS: dict[str, list[str]] = {
@@ -864,7 +911,7 @@ _COMMODITY_RSS_FEEDS: dict[str, list[str]] = {
 def fetch_news_from_rss(
     asset_id: str,
     asset_type: AssetType,
-    term: str,
+    term: str | list[str],
     feed_urls: list[str],
     max_items: int = 30,
 ) -> List[NewsItem]:
@@ -874,7 +921,10 @@ def fetch_news_from_rss(
     except ImportError:
         return []
 
-    term_l = term.lower()
+    terms = [term] if isinstance(term, str) else term
+    terms_l = [value.strip().lower() for value in terms if value and value.strip()]
+    if not terms_l:
+        return []
     seen: set[str] = set()
     items: List[NewsItem] = []
 
@@ -889,8 +939,8 @@ def fetch_news_from_rss(
         for entry in feed.entries:
             title = str(entry.get("title") or "")
             body  = str(entry.get("summary") or entry.get("description") or "")
-            combined = f"{title} {body}".lower()
-            if term_l not in combined:
+            combined = re.sub(r"<[^>]+>", " ", f"{title} {body}").lower()
+            if not any(_matches_news_term(combined, value) for value in terms_l):
                 continue
 
             link = str(entry.get("link") or "")
@@ -911,7 +961,7 @@ def fetch_news_from_rss(
                 continue
 
             items.append(NewsItem(
-                id=f"rss-{asset_id}-{abs(hash(link or title))}",
+                id=f"rss-{asset_id}-{_stable_news_id(link or title)}",
                 asset_id=asset_id,
                 source=f"rss:{url.split('/')[2]}",
                 title=title,
@@ -928,7 +978,18 @@ def fetch_news_from_rss(
     return items
 
 
-def fetch_gpw_news_from_rss(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
+def _stable_news_id(value: str) -> str:
+    return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()[:24]
+
+
+def _matches_news_term(text: str, term: str) -> bool:
+    """Match aliases without treating short ticker fragments as substrings."""
+    if len(term) <= 4 and term.replace(".", "").isalnum():
+        return re.search(rf"(?<![\w]){re.escape(term)}(?![\w])", text, flags=re.IGNORECASE) is not None
+    return term in text
+
+
+def fetch_gpw_news_from_rss(term: str | list[str], asset_id: str, asset_type: AssetType) -> List[NewsItem]:
     """RSS newsy dla spółek GPW — Bankier, StockWatch, PB."""
     return fetch_news_from_rss(asset_id, asset_type, term, _GPW_RSS_FEEDS)
 
@@ -951,7 +1012,13 @@ def fetch_commodity_news_from_rss(term: str, asset_id: str, asset_type: AssetTyp
 #  Klucz: NEWSAPI_API_KEY w .env
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> List[NewsItem]:
+def fetch_news_from_newsapi(
+    term: str | list[str],
+    asset_id: str,
+    asset_type: AssetType,
+    *,
+    language: str | None = "en",
+) -> List[NewsItem]:
     """
     Pobiera newsy z NewsAPI.org dla podanego term.
     Działa dla GPW ('KGHM'), surowców ('gold price') i US stocks.
@@ -961,14 +1028,17 @@ def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> 
         return []
 
     from_dt = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    terms = [term] if isinstance(term, str) else term
+    query = " OR ".join(f'"{value.strip()}"' for value in terms[:6] if value.strip())
     params = {
-        "q":        term,
+        "q":        query,
         "from":     from_dt,
         "sortBy":   "publishedAt",
-        "language": "en",
         "pageSize": 30,
         "apiKey":   settings.newsapi_api_key,
     }
+    if language:
+        params["language"] = language
     try:
         with httpx.Client(timeout=settings.sync_timeout_seconds) as client:
             response = client.get("https://newsapi.org/v2/everything", params=params)
@@ -987,7 +1057,7 @@ def fetch_news_from_newsapi(term: str, asset_id: str, asset_type: AssetType) -> 
         except Exception:
             pub_dt = datetime.now(timezone.utc)
         items.append(NewsItem(
-            id=f"newsapi-{asset_id}-{abs(hash(link or title))}",
+            id=f"newsapi-{asset_id}-{_stable_news_id(link or title)}",
             asset_id=asset_id,
             source="newsapi",
             title=title,

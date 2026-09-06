@@ -5,7 +5,7 @@ import json
 import math
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_, select
@@ -30,6 +30,7 @@ FEATURE_NAMES = (
 BUY_CLASS = 1
 NO_TRADE_CLASS = 0
 SELL_CLASS = -1
+CALIBRATION_MODEL_VERSION = "wf_v4_sigmoid_side_gate"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class ThresholdStats:
     expected_gross_pct: float
     expected_net_pct: float
     uncertainty_pct: float
+    reliability_cap: float = 0.0
 
 
 @dataclass
@@ -73,16 +75,18 @@ class CalibratedDecision:
     no_trade_reason: str | None
 
 
-_cache: dict[tuple[str, str, str], tuple[str, SegmentModel | None]] = {}
+_cache: dict[tuple[str, str, str, str], SegmentModel | None] = {}
+_fit_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
 _cache_lock = threading.Lock()
+_MAX_CACHED_DATA_SESSIONS = 8
 
 
 def _calibration_session(market: str | None, at: datetime | None = None) -> str:
-    """Stable cache generation for one local market day.
+    """Return the market session represented by a price/feature snapshot.
 
-    Rebuilding the model every hour caused thresholds to oscillate intraday.
-    A market-local date keeps the fitted calibration frozen for the session,
-    while still rotating it automatically on the next trading day.
+    Callers must pass the timestamp of the data being evaluated.  Using the
+    wall clock here made an unchanged candle receive a newly fitted model at
+    midnight and caused recommendations to disappear before the market open.
     """
     moment = ensure_utc(at or datetime.now(timezone.utc))
     timezone_name = "Europe/Warsaw" if market == "GPW" else "America/New_York" if market == "USA" else "UTC"
@@ -104,11 +108,80 @@ def transaction_cost_pct(market: str) -> float:
     return settings.recommendation_cost_other_pct
 
 
+def _decision_from_finalized_record(row) -> CalibratedDecision:
+    """Restore the immutable post-close decision stored in the journal."""
+    return CalibratedDecision(
+        action=row.action,
+        confidence_probability=max(0.0, min(1.0, float(row.confidence) / 100.0)),
+        probability_buy=max(0.0, min(1.0, float(row.probability_buy) / 100.0)),
+        probability_sell=max(0.0, min(1.0, float(row.probability_sell) / 100.0)),
+        probability_no_trade=max(0.0, min(1.0, float(row.probability_no_trade) / 100.0)),
+        market=row.market,
+        regime=row.regime,
+        scope=row.calibration_scope,
+        sample_size=int(row.calibration_sample_size),
+        buy_threshold=float(row.buy_threshold) / 100.0,
+        sell_threshold=float(row.sell_threshold) / 100.0,
+        transaction_cost_pct=float(row.transaction_cost_pct),
+        expected_gross_edge_pct=float(row.expected_gross_edge_pct),
+        expected_net_edge_pct=float(row.expected_net_edge_pct),
+        uncertainty_pct=float(row.uncertainty_pct),
+        no_trade_reason=row.no_trade_reason,
+    )
+
+
+def _finalized_session_decision(
+    db: Session,
+    asset: AssetORM,
+    feature: DailyAssetFeatureORM,
+) -> CalibratedDecision | None:
+    """Return the first complete decision created after this session closed.
+
+    A recommendation based on a completed daily bar is a decision artifact,
+    not a live query. Re-fitting overnight must never rewrite it while the
+    underlying OHLCV snapshot is unchanged.
+    """
+    from app.db.models import RecommendationRecordORM
+    from app.services.market_calendar import (
+        is_daily_bar_complete,
+        market_session_close,
+        market_session_date,
+    )
+    from app.services.recommendation_journal import MODEL_VERSION
+
+    symbol = asset.price_symbol or asset.symbol or ""
+    if not is_daily_bar_complete(symbol, feature.snapshot_at):
+        return None
+    session_day = market_session_date(symbol, feature.snapshot_at)
+    closed_at = ensure_utc(market_session_close(symbol, session_day))
+    row = db.scalar(
+        select(RecommendationRecordORM)
+        .where(
+            RecommendationRecordORM.asset_id == asset.id,
+            RecommendationRecordORM.snapshot_at == feature.snapshot_at,
+            RecommendationRecordORM.model_version == MODEL_VERSION,
+            RecommendationRecordORM.created_at >= closed_at,
+            RecommendationRecordORM.data_complete.is_(True),
+        )
+        .order_by(
+            RecommendationRecordORM.created_at.asc(),
+            RecommendationRecordORM.revision.asc(),
+            RecommendationRecordORM.id.asc(),
+        )
+        .limit(1)
+    )
+    return _decision_from_finalized_record(row) if row is not None else None
+
+
 def _vector(payload: dict) -> list[float]:
     values: list[float] = []
     for name in FEATURE_NAMES:
         try:
             value = float(payload.get(name, 0.0) or 0.0)
+            if name == "iv_rank":
+                # Older snapshots may contain values outside the documented
+                # range.  Keep them from distorting both fit and inference.
+                value = max(0.0, min(100.0, value))
             values.append(value if math.isfinite(value) else 0.0)
         except (TypeError, ValueError):
             values.append(0.0)
@@ -207,9 +280,59 @@ def _apply_calibration(raw, calibrators):
     calibrated = np.zeros_like(raw, dtype=float)
     for column, label in enumerate((SELL_CLASS, NO_TRADE_CLASS, BUY_CLASS)):
         calibrator = calibrators.get(label)
-        calibrated[:, column] = calibrator.predict(raw[:, column]) if calibrator is not None else raw[:, column]
+        if calibrator is None:
+            calibrated[:, column] = raw[:, column]
+        elif hasattr(calibrator, "predict_proba"):
+            calibrated[:, column] = calibrator.predict_proba(
+                raw[:, column].reshape(-1, 1)
+            )[:, 1]
+        else:
+            # Kompatybilność ze starszymi obiektami izotonicznymi w testach.
+            calibrated[:, column] = calibrator.predict(raw[:, column])
     totals = calibrated.sum(axis=1, keepdims=True)
     return np.divide(calibrated, totals, out=raw.copy(), where=totals > 0)
+
+
+def _fit_probability_calibrator(probabilities, binary_target):
+    """Fit a smooth Platt calibrator instead of a step-wise isotonic map.
+
+    Izotonic regression produced large probability plateaus in smaller market
+    segments, making unrelated assets receive exactly the same 87.6% signal.
+    A sigmoid keeps the mapping monotonic while preserving useful ranking.
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    target = np.asarray(binary_target, dtype=int)
+    if len(set(target.tolist())) < 2:
+        return None
+    return LogisticRegression(max_iter=500, random_state=42).fit(
+        np.asarray(probabilities, dtype=float).reshape(-1, 1), target
+    )
+
+
+def _model_pipeline():
+    """The single classifier pipeline used by live fitting and its audit."""
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import RobustScaler
+
+    return make_pipeline(
+        SimpleImputer(strategy="median"),
+        RobustScaler(),
+        LogisticRegression(max_iter=2500, class_weight="balanced", random_state=42),
+    )
+
+
+def _wilson_lower_bound(wins: int, total: int, z: float = 1.645) -> float:
+    if total <= 0:
+        return 0.0
+    rate = wins / total
+    denominator = 1.0 + z * z / total
+    centre = rate + z * z / (2.0 * total)
+    margin = z * math.sqrt((rate * (1.0 - rate) + z * z / (4.0 * total)) / total)
+    return max(0.0, min(1.0, (centre - margin) / denominator))
 
 
 def _tune_threshold(probabilities, returns, costs, direction: int) -> ThresholdStats:
@@ -221,6 +344,11 @@ def _tune_threshold(probabilities, returns, costs, direction: int) -> ThresholdS
     costs = np.asarray(costs, dtype=float)
     directional_gross = returns if direction == BUY_CLASS else -returns
     minimum_selected = max(10, int(len(returns) * 0.04))
+    # Bezpiecznik na utratę rozdzielczości kalibratora. Gdy prawie cała próba
+    # wpada do kilku identycznych kubełków, próg nie ma podstaw do selekcji.
+    minimum_unique = min(20, max(5, len(probabilities) // 50))
+    if len(np.unique(np.round(probabilities, 4))) < minimum_unique:
+        return ThresholdStats(1.01, 0, 0.0, 0.0, 0.0, 0.0)
     best: ThresholdStats | None = None
     best_lower_bound = float("-inf")
 
@@ -237,20 +365,46 @@ def _tune_threshold(probabilities, returns, costs, direction: int) -> ThresholdS
         lower_bound = mean_net - uncertainty
         if lower_bound > best_lower_bound:
             best_lower_bound = lower_bound
-            best = ThresholdStats(round(float(threshold), 3), selected, mean_gross, mean_net, uncertainty)
+            reliability_cap = _wilson_lower_bound(int((net > 0).sum()), selected)
+            best = ThresholdStats(
+                round(float(threshold), 3), selected, mean_gross, mean_net,
+                uncertainty, reliability_cap,
+            )
 
     if best is None or best_lower_bound <= 0:
-        return ThresholdStats(1.01, 0, 0.0, 0.0, 0.0)
+        return ThresholdStats(1.01, 0, 0.0, 0.0, 0.0, 0.0)
     return best
+
+
+def _select_calibrated_action(
+    p_sell: float,
+    p_no_trade: float,
+    p_buy: float,
+    buy: ThresholdStats,
+    sell: ThresholdStats,
+) -> int:
+    """Select a trade only when its side passes the edge gate and dominates."""
+    buy_ok = (
+        p_buy >= buy.threshold
+        and buy.expected_net_pct > buy.uncertainty_pct
+        and p_buy > p_sell
+        and p_buy > p_no_trade
+    )
+    sell_ok = (
+        p_sell >= sell.threshold
+        and sell.expected_net_pct > sell.uncertainty_pct
+        and p_sell > p_buy
+        and p_sell > p_no_trade
+    )
+    if buy_ok:
+        return BUY_CLASS
+    if sell_ok:
+        return SELL_CLASS
+    return NO_TRADE_CLASS
 
 
 def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str) -> SegmentModel | None:
     import numpy as np
-    from sklearn.impute import SimpleImputer
-    from sklearn.isotonic import IsotonicRegression
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
 
     samples = _load_samples(db, market, regime)
     if len(samples) < settings.recommendation_calibration_min_rows:
@@ -261,13 +415,6 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
     costs = np.asarray([row[3] for row in samples], dtype=float)
     if len(set(y.tolist())) < 2:
         return None
-
-    def pipeline():
-        return make_pipeline(
-            SimpleImputer(strategy="median"),
-            StandardScaler(),
-            LogisticRegression(max_iter=400, class_weight="balanced", random_state=42),
-        )
 
     split_count = 4 if len(samples) >= 400 else 3
     session_groups = [ensure_utc(row[4]).date().isoformat() for row in samples]
@@ -283,7 +430,7 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
         test_idx = np.asarray(test_idx, dtype=int)
         if len(set(y[train_idx].tolist())) < 2:
             continue
-        fold_model = pipeline()
+        fold_model = _model_pipeline()
         fold_model.fit(X[train_idx], y[train_idx])
         oof_probabilities.append(_probability_matrix(fold_model, X[test_idx]))
         oof_y.append(y[test_idx]); oof_returns.append(returns[test_idx]); oof_costs.append(costs[test_idx])
@@ -304,7 +451,7 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
         if len(set(binary.tolist())) < 2:
             calibrators[label] = None
         else:
-            calibrators[label] = IsotonicRegression(out_of_bounds="clip").fit(
+            calibrators[label] = _fit_probability_calibrator(
                 raw_oof[:calibration_end, column], binary
             )
 
@@ -314,7 +461,7 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
     buy = _tune_threshold(tuned_probs[:, 2], tuned_returns, tuned_costs, BUY_CLASS)
     sell = _tune_threshold(tuned_probs[:, 0], tuned_returns, tuned_costs, SELL_CLASS)
 
-    final_model = pipeline()
+    final_model = _model_pipeline()
     final_model.fit(X, y)
     return SegmentModel(
         model=final_model,
@@ -328,17 +475,34 @@ def _fit_segment(db: Session, market: str | None, regime: str | None, scope: str
     )
 
 
-def _cached_fit(db: Session, market: str | None, regime: str | None, scope: str) -> SegmentModel | None:
-    key = (str(db.get_bind().url), market or "ALL", regime or "ALL")
-    session = _calibration_session(market)
+def _cached_fit(
+    db: Session,
+    market: str | None,
+    regime: str | None,
+    scope: str,
+    *,
+    at: datetime | None = None,
+) -> SegmentModel | None:
+    # The cache generation follows the evaluated market data, not the current
+    # time.  Therefore an unchanged snapshot always uses exactly the same
+    # fitted calibration, including across midnight and over weekends.
+    session = _calibration_session(market, at)
+    key = (str(db.get_bind().url), market or "ALL", regime or "ALL", session)
     with _cache_lock:
-        cached = _cache.get(key)
-        if cached and cached[0] == session:
-            return cached[1]
-    fitted = _fit_segment(db, market, regime, scope)
-    with _cache_lock:
-        _cache[key] = (session, fitted)
-    return fitted
+        if key in _cache:
+            return _cache[key]
+        fit_lock = _fit_locks.setdefault(key, threading.Lock())
+    # Only one request may fit a segment generation. Without this per-key lock,
+    # overlapping API/scheduler calls could overwrite the cache with models
+    # trained against different hourly dataset transactions.
+    with fit_lock:
+        with _cache_lock:
+            if key in _cache:
+                return _cache[key]
+        fitted = _fit_segment(db, market, regime, scope)
+        with _cache_lock:
+            _cache[key] = fitted
+        return fitted
 
 
 def _current_vector(db: Session, asset_id: str, feature: DailyAssetFeatureORM) -> list[float]:
@@ -356,22 +520,46 @@ def _current_vector(db: Session, asset_id: str, feature: DailyAssetFeatureORM) -
     return _vector({name: getattr(feature, name, 0.0) for name in FEATURE_NAMES})
 
 
-def _walk_forward_gate(db: Session, market: str, regime: str) -> tuple[bool, str | None]:
+def _walk_forward_gate(
+    db: Session,
+    market: str,
+    regime: str,
+    action: str,
+) -> tuple[bool, str | None]:
     """Blokuje live trade, jeśli nietknięty test nie potwierdza segmentu."""
     from app.db.models import RecommendationAuditRunORM
 
     row = db.scalar(
         select(RecommendationAuditRunORM)
-        .where(RecommendationAuditRunORM.model_version == "walk_forward_v2")
+        .where(RecommendationAuditRunORM.model_version == CALIBRATION_MODEL_VERSION)
         .order_by(RecommendationAuditRunORM.created_at.desc())
         .limit(1)
     )
     if row is None:
-        return True, None
+        return False, "Brak aktualnego audytu walk-forward dla tej wersji modelu."
     try:
         report = json.loads(row.result_json)
-        market_metric = next((item for item in report.get("by_market", []) if item.get("name") == market), None)
-        regime_metric = next((item for item in report.get("by_regime", []) if item.get("name") == regime), None)
+        created_at = ensure_utc(row.created_at)
+        if created_at is None or datetime.now(timezone.utc) - created_at > timedelta(
+            days=max(1, settings.recommendation_audit_max_age_days)
+        ):
+            return False, "Audyt walk-forward jest zbyt stary; transakcja czeka na ponowną walidację."
+
+        side = action.upper()
+        market_metric = next(
+            (
+                item for item in report.get("by_market_side", [])
+                if item.get("name") == market and item.get("side") == side
+            ),
+            None,
+        )
+        regime_metric = next(
+            (
+                item for item in report.get("by_regime_side", [])
+                if item.get("name") == regime and item.get("side") == side
+            ),
+            None,
+        )
 
         def accepted(metric: dict | None, minimum_trades: int) -> bool:
             if not metric or int(metric.get("trades", 0)) < minimum_trades:
@@ -380,14 +568,15 @@ def _walk_forward_gate(db: Session, market: str, regime: str) -> tuple[bool, str
             return (
                 float(metric.get("avg_net_return_pct", 0.0)) > 0
                 and profit_factor is not None
-                and float(profit_factor) > 1.0
+                and float(profit_factor) >= settings.recommendation_audit_min_profit_factor
+                and float(metric.get("win_rate_pct", 0.0)) >= settings.recommendation_audit_min_win_rate_pct
             )
 
         failures = []
-        if not accepted(market_metric, 50):
-            failures.append(f"rynek {market}")
-        if not accepted(regime_metric, 30):
-            failures.append(f"reżim {regime}")
+        if not accepted(market_metric, settings.recommendation_audit_min_market_side_trades):
+            failures.append(f"rynek {market}/{side}")
+        if not accepted(regime_metric, settings.recommendation_audit_min_regime_side_trades):
+            failures.append(f"reżim {regime}/{side}")
         if failures:
             return False, "Audyt walk-forward nie potwierdza jeszcze dodatniej przewagi: " + ", ".join(failures) + "."
         return True, None
@@ -402,6 +591,10 @@ def calibrate_recommendation(
 ) -> CalibratedDecision:
     import numpy as np
 
+    finalized = _finalized_session_decision(db, asset, feature)
+    if finalized is not None:
+        return finalized
+
     market = market_segment(asset)
     regime = feature.regime_label
     candidates = (
@@ -411,7 +604,11 @@ def calibrate_recommendation(
         (None, None, "global"),
     )
     segment = next(
-        (model for m, r, scope in candidates if (model := _cached_fit(db, m, r, scope)) is not None),
+        (
+            model
+            for m, r, scope in candidates
+            if (model := _cached_fit(db, m, r, scope, at=feature.snapshot_at)) is not None
+        ),
         None,
     )
     cost = transaction_cost_pct(market)
@@ -428,18 +625,31 @@ def calibrate_recommendation(
     raw = _probability_matrix(segment.model, np.asarray([_current_vector(db, asset.id, feature)]))
     calibrated = _apply_calibration(raw, segment.calibrators)[0]
     p_sell, p_no_trade, p_buy = (float(value) for value in calibrated)
-    buy_pass = p_buy >= segment.buy.threshold and segment.buy.expected_net_pct > segment.buy.uncertainty_pct
-    sell_pass = p_sell >= segment.sell.threshold and segment.sell.expected_net_pct > segment.sell.uncertainty_pct
+    action_class = _select_calibrated_action(
+        p_sell, p_no_trade, p_buy, segment.buy, segment.sell
+    )
 
-    if buy_pass and (not sell_pass or p_buy - segment.buy.threshold >= p_sell - segment.sell.threshold):
-        action, stats, confidence, reason = "BUY", segment.buy, p_buy, None
-    elif sell_pass:
-        action, stats, confidence, reason = "SELL", segment.sell, p_sell, None
+    if action_class == BUY_CLASS:
+        action, stats, confidence, reason = "BUY", segment.buy, min(p_buy, segment.buy.reliability_cap), None
+    elif action_class == SELL_CLASS:
+        action, stats, confidence, reason = "SELL", segment.sell, min(p_sell, segment.sell.reliability_cap), None
     else:
         action, confidence = "NO_TRADE", p_no_trade
         best = segment.buy if p_buy - segment.buy.threshold >= p_sell - segment.sell.threshold else segment.sell
         stats = best
-        if best.threshold > 1:
+        directional_threshold_pass = (
+            p_buy >= segment.buy.threshold
+            and segment.buy.expected_net_pct > segment.buy.uncertainty_pct
+        ) or (
+            p_sell >= segment.sell.threshold
+            and segment.sell.expected_net_pct > segment.sell.uncertainty_pct
+        )
+        if directional_threshold_pass:
+            reason = (
+                "Próg kierunkowy został przekroczony, ale ten kierunek nie ma "
+                "najwyższego skalibrowanego prawdopodobieństwa."
+            )
+        elif best.threshold > 1:
             reason = "Historia nie potwierdza dodatniej przewagi po kosztach dla tego segmentu."
         elif best.expected_net_pct <= best.uncertainty_pct:
             reason = "Oczekiwana przewaga netto nie pokrywa niepewności historycznej."
@@ -447,7 +657,7 @@ def calibrate_recommendation(
             reason = "Prawdopodobieństwo sygnału nie przekracza skalibrowanego progu wejścia."
 
     if action in {"BUY", "SELL"}:
-        audit_allowed, audit_reason = _walk_forward_gate(db, market, regime)
+        audit_allowed, audit_reason = _walk_forward_gate(db, market, regime, action)
         if not audit_allowed:
             action, confidence, reason = "NO_TRADE", p_no_trade, audit_reason
 
@@ -472,20 +682,23 @@ def calibrate_recommendation(
 
 
 def invalidate_calibration_cache(*, force: bool = False) -> None:
-    """Drop stale sessions, preserving today's frozen live calibration.
+    """Bound old data sessions without invalidating the active snapshot.
 
-    Scheduler dataset refreshes call this function every hour. Clearing the
-    entire cache there used to refit thresholds intraday. ``force`` remains
-    available for tests and explicit administrative maintenance.
+    Scheduler refreshes call this function hourly.  Sessions are keyed by the
+    evaluated feature timestamp, so calendar midnight must not decide which
+    model is stale. ``force`` is reserved for tests and explicit maintenance.
     """
     with _cache_lock:
         if force:
             _cache.clear()
+            _fit_locks.clear()
             return
-        stale = []
-        for key, (session, _) in _cache.items():
-            market = None if key[1] == "ALL" else key[1]
-            if session != _calibration_session(market):
-                stale.append(key)
-        for key in stale:
-            _cache.pop(key, None)
+        grouped: dict[tuple[str, str, str], list[str]] = {}
+        for db_url, market, regime, session in _cache:
+            grouped.setdefault((db_url, market, regime), []).append(session)
+        for prefix, sessions in grouped.items():
+            retained = set(sorted(set(sessions), reverse=True)[:_MAX_CACHED_DATA_SESSIONS])
+            for key in list(_cache):
+                if key[:3] == prefix and key[3] not in retained:
+                    _cache.pop(key, None)
+                    _fit_locks.pop(key, None)

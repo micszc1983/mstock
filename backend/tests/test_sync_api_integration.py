@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -12,12 +12,16 @@ from app.schemas.news import NewsItem
 
 def test_sync_prices_endpoint_end_to_end(test_app, monkeypatch):
     from app.services import sync as sync_service
+    unique_session = (
+        datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        - timedelta(days=1)
+    )
 
     def fake_fetch_stock_prices(symbol: str):
         assert symbol == "NVDA"
         return [
             PricePoint(
-                timestamp=datetime(2026, 4, 12, tzinfo=timezone.utc),
+                timestamp=unique_session,
                 open=110.0,
                 high=112.0,
                 low=109.0,

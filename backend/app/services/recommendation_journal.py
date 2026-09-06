@@ -14,7 +14,7 @@ from app.db.models import PricePointORM, RecommendationRecordORM
 from app.schemas.recommendation import AssetRecommendation
 
 
-MODEL_VERSION = "calibrated_v6_oof_meta"
+MODEL_VERSION = "calibrated_v7_sigmoid_side_gate"
 HORIZONS = (1, 5, 20)
 _journal_lock = threading.RLock()
 

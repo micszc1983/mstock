@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.models import (
     EarningsORM, InsiderTradeORM, NewsItemORM, NewsNLPRunORM, ShortInterestORM,
 )
@@ -225,33 +226,43 @@ class PointInTimeFeatureStore:
         baseline_index = bisect_right(self.news_times, baseline_cutoff, hi=recent_index)
         recent_news = self.news[recent_index:end_index]
         baseline_news = self.news[baseline_index:recent_index]
+        recent_pairs = [
+            (row, self._known_nlp_run(row.id, snap_dt)) for row in recent_news
+        ]
+        eligible_pairs = [
+            (row, run) for row, run in recent_pairs
+            if run is not None and float(run.relevance_score) >= settings.news_min_relevance
+        ]
+        eligible_baseline = [
+            row for row in baseline_news
+            if (run := self._known_nlp_run(row.id, snap_dt)) is not None
+            and float(run.relevance_score) >= settings.news_min_relevance
+        ]
         event_counts: Counter[str] = Counter()
         positive = negative = high_impact = 0.0
         nlp_count = 0
         relevance_sum = confidence_sum = 0.0
-        for row in recent_news:
+        for row, nlp in eligible_pairs:
+            sentiment = float(nlp.sentiment_score)
+            relevance = float(nlp.relevance_score)
+            confidence = float(nlp.sentiment_confidence)
+            nlp_count += 1
+            relevance_sum += relevance
+            confidence_sum += confidence
             events = classify_news_events(row.title, row.body)
             if not events:
                 continue
             for event in events:
                 event_counts[event] += 1
-            nlp = self._known_nlp_run(row.id, snap_dt)
-            sentiment = float(nlp.sentiment_score) if nlp is not None else float(row.sentiment_score or 0.0)
-            relevance = float(nlp.relevance_score) if nlp is not None else 1.0
-            confidence = float(nlp.sentiment_confidence) if nlp is not None else 0.5
-            if nlp is not None:
-                nlp_count += 1
-                relevance_sum += relevance
-                confidence_sum += confidence
-            weight = max(0.05, abs(float(row.impact_score or 0.0)) * relevance * confidence)
+            weight = abs(float(row.impact_score or 0.0)) * relevance * confidence
             if sentiment > 0.1:
                 positive += weight
             elif sentiment < -0.1:
                 negative += weight
             if float(row.impact_score or 0.0) >= 0.65:
                 high_impact += 1.0
-        weekly_baseline = len(baseline_news) / 12.0
-        attention_z = (len(recent_news) - weekly_baseline) / math.sqrt(weekly_baseline + 1.0)
+        weekly_baseline = len(eligible_baseline) / 12.0
+        attention_z = (len(eligible_pairs) - weekly_baseline) / math.sqrt(weekly_baseline + 1.0)
 
         return {
             "has_iv": float(has_iv),
@@ -283,11 +294,11 @@ class PointInTimeFeatureStore:
             "news_event_contract_product_7d": float(event_counts["contract_product"]),
             "news_event_management_cyber_7d": float(event_counts["management_cyber"]),
             "news_attention_zscore_7d": round(attention_z, 6),
-            "news_source_diversity_7d": float(len({row.source for row in recent_news})),
+            "news_source_diversity_7d": float(len({row.source for row, _ in eligible_pairs})),
             "news_high_impact_7d": high_impact,
-            "news_nlp_coverage_7d": nlp_count / len(recent_news) if recent_news else 0.0,
+            "news_nlp_coverage_7d": sum(run is not None for _, run in recent_pairs) / len(recent_news) if recent_news else 0.0,
             "news_relevance_mean_7d": relevance_sum / nlp_count if nlp_count else 0.0,
             "news_sentiment_confidence_mean_7d": confidence_sum / nlp_count if nlp_count else 0.0,
             # Replace the historically incorrect now()-based count in old snapshots.
-            "news_count_7d": float(len(recent_news)),
+            "news_count_7d": float(len(eligible_pairs)),
         }

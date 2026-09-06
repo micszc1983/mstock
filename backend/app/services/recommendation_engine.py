@@ -50,7 +50,7 @@ def _norm(value: float, center: float, scale: float) -> float:
 
 
 def _forecast_consensus_veto(recommendation: str, *forecasts) -> str | None:
-    """Move a calibrated action to no-trade on strong 1d/5d/20d disagreement."""
+    """Move a calibrated action to no-trade on multi-horizon disagreement."""
     if len(forecasts) != 3 or any(forecast is None for forecast in forecasts):
         return None
     threshold = _clamp(
@@ -60,10 +60,18 @@ def _forecast_consensus_veto(recommendation: str, *forecasts) -> str | None:
     )
     directions = [(forecast.direction or "").lower() for forecast in forecasts]
     up_probabilities = [float(forecast.up_probability) for forecast in forecasts]
+    # Horyzont 5d jest zgodny z targetem kalibratora, 20d stabilizuje sygnał,
+    # a 1d ma tylko rolę pomocniczą. Większość zgodnych horyzontów wystarcza,
+    # jeżeli ich ważone prawdopodobieństwo także przeczy transakcji.
+    weighted_up = (
+        up_probabilities[0] * 0.20
+        + up_probabilities[1] * 0.45
+        + up_probabilities[2] * 0.35
+    )
     if (
         recommendation == "KUP"
-        and all(direction == "down" for direction in directions)
-        and all(probability <= threshold for probability in up_probabilities)
+        and sum(direction == "down" for direction in directions) >= 2
+        and weighted_up <= min(0.48, threshold + 0.03)
     ):
         return (
             "Sygnał KUP został przeniesiony do strefy bez transakcji: "
@@ -71,12 +79,27 @@ def _forecast_consensus_veto(recommendation: str, *forecasts) -> str | None:
         )
     if (
         recommendation == "SPRZEDAJ"
-        and all(direction == "up" for direction in directions)
-        and all(probability >= 1.0 - threshold for probability in up_probabilities)
+        and sum(direction == "up" for direction in directions) >= 2
+        and weighted_up >= max(0.52, 1.0 - threshold - 0.03)
     ):
         return (
             "Sygnał SPRZEDAJ został przeniesiony do strefy bez transakcji: "
             "prognozy 1d, 5d i 20d zgodnie wskazują wyraźną przewagę wzrostu."
+        )
+    return None
+
+
+def _composite_consistency_veto(recommendation: str, composite_score: float) -> str | None:
+    """Prevent a directional trade that contradicts the broad signal basket."""
+    if recommendation == "SPRZEDAJ" and composite_score >= 55.0:
+        return (
+            "Sygnał SPRZEDAJ został przeniesiony do strefy bez transakcji: "
+            "łączny koszyk sygnałów nie potwierdza presji spadkowej."
+        )
+    if recommendation == "KUP" and composite_score <= 45.0:
+        return (
+            "Sygnał KUP został przeniesiony do strefy bez transakcji: "
+            "łączny koszyk sygnałów nie potwierdza przewagi wzrostowej."
         )
     return None
 
@@ -281,7 +304,10 @@ def build_recommendation(db: Session, asset_id: str) -> AssetRecommendation | No
     meta_gate_applied = False
     final_no_trade_reason = calibrated.no_trade_reason
     confidence_probability = calibrated.confidence_probability
-    forecast_gate_reason = _forecast_consensus_veto(recommendation, f1, f5, f20)
+    forecast_gate_reason = (
+        _forecast_consensus_veto(recommendation, f1, f5, f20)
+        or _composite_consistency_veto(recommendation, composite)
+    )
     if forecast_gate_reason is not None:
         recommendation = "TRZYMAJ" if held else "BRAK TRANSAKCJI"
         final_no_trade_reason = forecast_gate_reason

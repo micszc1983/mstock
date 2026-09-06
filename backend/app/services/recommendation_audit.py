@@ -23,17 +23,21 @@ from app.db.models import (
 )
 from app.services.recommendation_calibration import (
     BUY_CLASS,
+    CALIBRATION_MODEL_VERSION,
     NO_TRADE_CLASS,
     SELL_CLASS,
     _apply_calibration,
+    _fit_probability_calibrator,
+    _model_pipeline,
     _probability_matrix,
+    _select_calibrated_action,
     _tune_threshold,
     _vector,
     transaction_cost_pct,
 )
 
 
-AUDIT_MODEL_VERSION = "walk_forward_v2"
+AUDIT_MODEL_VERSION = CALIBRATION_MODEL_VERSION
 EMBARGO_SESSIONS = 20
 DEFAULT_FOLDS = 3
 
@@ -146,19 +150,6 @@ def load_audit_samples(db: Session) -> list[AuditSample]:
     return result
 
 
-def _pipeline():
-    from sklearn.impute import SimpleImputer
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import RobustScaler
-
-    return make_pipeline(
-        SimpleImputer(strategy="median"),
-        RobustScaler(),
-        LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42),
-    )
-
-
 def _clip(matrix, lower, upper):
     import numpy as np
     return np.minimum(np.maximum(matrix, lower), upper)
@@ -166,7 +157,6 @@ def _clip(matrix, lower, upper):
 
 def _fit_segment(samples: list[AuditSample], scope: str) -> AuditSegmentModel | None:
     import numpy as np
-    from sklearn.isotonic import IsotonicRegression
 
     minimum = settings.recommendation_calibration_min_rows
     if len(samples) < minimum:
@@ -189,21 +179,18 @@ def _fit_segment(samples: list[AuditSample], scope: str) -> AuditSegmentModel | 
     if len(samples) - second < 20 or len(set(y[:first].tolist())) < 2:
         return None
 
-    base = _pipeline()
+    base = _model_pipeline()
     base.fit(X[:first], y[:first])
     raw_cal = _probability_matrix(base, X[first:second])
     calibrators: dict[int, object | None] = {}
     for column, label in enumerate((SELL_CLASS, NO_TRADE_CLASS, BUY_CLASS)):
         binary = (y[first:second] == label).astype(float)
-        calibrators[label] = (
-            IsotonicRegression(out_of_bounds="clip").fit(raw_cal[:, column], binary)
-            if len(set(binary.tolist())) >= 2 else None
-        )
+        calibrators[label] = _fit_probability_calibrator(raw_cal[:, column], binary)
     tuned = _apply_calibration(_probability_matrix(base, X[second:]), calibrators)
     buy = _tune_threshold(tuned[:, 2], returns[second:], costs[second:], BUY_CLASS)
     sell = _tune_threshold(tuned[:, 0], returns[second:], costs[second:], SELL_CLASS)
 
-    final = _pipeline()
+    final = _model_pipeline()
     final.fit(X, y)
     return AuditSegmentModel(final, calibrators, lower, upper, buy, sell, scope, len(samples))
 
@@ -215,14 +202,13 @@ def _predict(model: AuditSegmentModel, sample: AuditSample) -> tuple[int, list[f
     p_sell, p_no_trade, p_buy = _apply_calibration(
         _probability_matrix(model.model, matrix), model.calibrators
     )[0]
-    buy_ok = p_buy >= model.buy.threshold and model.buy.expected_net_pct > model.buy.uncertainty_pct
-    sell_ok = p_sell >= model.sell.threshold and model.sell.expected_net_pct > model.sell.uncertainty_pct
-    if buy_ok and (not sell_ok or p_buy - model.buy.threshold >= p_sell - model.sell.threshold):
-        action = BUY_CLASS
-    elif sell_ok:
-        action = SELL_CLASS
-    else:
-        action = NO_TRADE_CLASS
+    action = _select_calibrated_action(
+        float(p_sell),
+        float(p_no_trade),
+        float(p_buy),
+        model.buy,
+        model.sell,
+    )
     return action, [float(p_sell), float(p_no_trade), float(p_buy)]
 
 
@@ -333,6 +319,19 @@ def _breakdown(rows: list[dict], field: str) -> list[dict]:
     return result
 
 
+def _side_breakdown(rows: list[dict], field: str) -> list[dict]:
+    result = []
+    for name in sorted({str(row[field]) for row in rows}):
+        for action, side in ((BUY_CLASS, "BUY"), (SELL_CLASS, "SELL")):
+            subset = [
+                row for row in rows
+                if str(row[field]) == name and row["calibrated_action"] == action
+            ]
+            metrics = _strategy_metrics(subset, "calibrated")
+            result.append({"name": name, "side": side, **metrics})
+    return result
+
+
 def run_walk_forward_audit(db: Session, fold_count: int = DEFAULT_FOLDS) -> dict:
     all_samples = load_audit_samples(db)
     excluded = [row for row in all_samples if row.outlier_reason]
@@ -439,9 +438,12 @@ def run_walk_forward_audit(db: Session, fold_count: int = DEFAULT_FOLDS) -> dict
         "calibration": _calibration_metrics(evaluated),
         "by_market": _breakdown(evaluated, "market"),
         "by_regime": _breakdown(evaluated, "regime"),
+        "by_market_side": _side_breakdown(evaluated, "market"),
+        "by_regime_side": _side_breakdown(evaluated, "regime"),
         "notes": [
             "Testy są chronologiczne; pomiędzy treningiem i testem pozostaje 20 sesji embargo.",
             "Koszt jest odejmowany od każdej decyzji BUY/SELL; NO_TRADE ma zwrot 0.",
+            "Bramka live wymaga osobnego potwierdzenia przewagi dla strony BUY lub SELL, zarówno dla rynku, jak i reżimu.",
             "legacy_feature_rule jest odtwarzalnym przybliżeniem starej reguły 62/38 na cechach historycznych.",
             "Portfolio return agreguje średni 5-sesyjny wynik wszystkich aktywów danego dnia; okna częściowo się nakładają.",
             "Podejrzane skoki cen są raportowane i wyłączane z treningu, bez modyfikacji źródłowego OHLCV.",
@@ -495,6 +497,7 @@ def automatic_audit_status(
     ))
     latest = db.scalar(
         select(RecommendationAuditRunORM)
+        .where(RecommendationAuditRunORM.model_version == AUDIT_MODEL_VERSION)
         .order_by(RecommendationAuditRunORM.created_at.desc())
         .limit(1)
     )

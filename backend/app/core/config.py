@@ -51,6 +51,8 @@ try:
         ml_model_run_retention_count: int = 15
         allow_seed_cleanup: bool = False
         startup_rebuild_enabled: bool = False
+        weekend_news_interval_hours: int = 3
+        sunday_prepare_hour: int = 21
         recommendation_cost_usa_pct: float = 0.20
         recommendation_cost_gpw_pct: float = 0.40
         recommendation_cost_other_pct: float = 0.35
@@ -65,6 +67,11 @@ try:
         recommendation_audit_interval_days: int = 7
         recommendation_audit_min_new_outcomes: int = 50
         recommendation_audit_folds: int = 3
+        recommendation_audit_max_age_days: int = 14
+        recommendation_audit_min_market_side_trades: int = 30
+        recommendation_audit_min_regime_side_trades: int = 20
+        recommendation_audit_min_profit_factor: float = 1.10
+        recommendation_audit_min_win_rate_pct: float = 52.0
         triple_barrier_horizon_sessions: int = 10
         triple_barrier_take_profit_vol_multiplier: float = 1.25
         triple_barrier_stop_loss_vol_multiplier: float = 0.90
@@ -78,7 +85,13 @@ try:
         ml_monitoring_enabled: bool = True
         ml_drift_psi_warning: float = 0.20
         ml_drift_psi_critical: float = 0.35
+        ml_drift_window_rows: int = 200
+        ml_drift_min_live_predictions: int = 100
         ml_monitor_min_outcomes: int = 20
+        news_min_relevance: float = 0.35
+        news_analysis_lookback_days: int = 30
+        nlp_reprocess_days: int = 30
+        nlp_upgrade_per_asset_cycle: int = 2
         testing: bool = False
 
         # SMS via SIM800C (USB modem, AT commands)
@@ -149,6 +162,8 @@ except ImportError:
         ml_model_run_retention_count: int = int(os.getenv("ML_MODEL_RUN_RETENTION_COUNT", "15"))
         allow_seed_cleanup: bool = os.getenv("ALLOW_SEED_CLEANUP", "false").lower() == "true"
         startup_rebuild_enabled: bool = os.getenv("STARTUP_REBUILD_ENABLED", "false").lower() == "true"
+        weekend_news_interval_hours: int = int(os.getenv("WEEKEND_NEWS_INTERVAL_HOURS", "3"))
+        sunday_prepare_hour: int = int(os.getenv("SUNDAY_PREPARE_HOUR", "21"))
         recommendation_cost_usa_pct: float = float(os.getenv("RECOMMENDATION_COST_USA_PCT", "0.20"))
         recommendation_cost_gpw_pct: float = float(os.getenv("RECOMMENDATION_COST_GPW_PCT", "0.40"))
         recommendation_cost_other_pct: float = float(os.getenv("RECOMMENDATION_COST_OTHER_PCT", "0.35"))
@@ -163,6 +178,11 @@ except ImportError:
         recommendation_audit_interval_days: int = int(os.getenv("RECOMMENDATION_AUDIT_INTERVAL_DAYS", "7"))
         recommendation_audit_min_new_outcomes: int = int(os.getenv("RECOMMENDATION_AUDIT_MIN_NEW_OUTCOMES", "50"))
         recommendation_audit_folds: int = int(os.getenv("RECOMMENDATION_AUDIT_FOLDS", "3"))
+        recommendation_audit_max_age_days: int = int(os.getenv("RECOMMENDATION_AUDIT_MAX_AGE_DAYS", "14"))
+        recommendation_audit_min_market_side_trades: int = int(os.getenv("RECOMMENDATION_AUDIT_MIN_MARKET_SIDE_TRADES", "30"))
+        recommendation_audit_min_regime_side_trades: int = int(os.getenv("RECOMMENDATION_AUDIT_MIN_REGIME_SIDE_TRADES", "20"))
+        recommendation_audit_min_profit_factor: float = float(os.getenv("RECOMMENDATION_AUDIT_MIN_PROFIT_FACTOR", "1.10"))
+        recommendation_audit_min_win_rate_pct: float = float(os.getenv("RECOMMENDATION_AUDIT_MIN_WIN_RATE_PCT", "52.0"))
         triple_barrier_horizon_sessions: int = int(os.getenv("TRIPLE_BARRIER_HORIZON_SESSIONS", "10"))
         triple_barrier_take_profit_vol_multiplier: float = float(os.getenv("TRIPLE_BARRIER_TAKE_PROFIT_VOL_MULTIPLIER", "1.25"))
         triple_barrier_stop_loss_vol_multiplier: float = float(os.getenv("TRIPLE_BARRIER_STOP_LOSS_VOL_MULTIPLIER", "0.90"))
@@ -176,7 +196,13 @@ except ImportError:
         ml_monitoring_enabled: bool = os.getenv("ML_MONITORING_ENABLED", "true").lower() == "true"
         ml_drift_psi_warning: float = float(os.getenv("ML_DRIFT_PSI_WARNING", "0.20"))
         ml_drift_psi_critical: float = float(os.getenv("ML_DRIFT_PSI_CRITICAL", "0.35"))
+        ml_drift_window_rows: int = int(os.getenv("ML_DRIFT_WINDOW_ROWS", "200"))
+        ml_drift_min_live_predictions: int = int(os.getenv("ML_DRIFT_MIN_LIVE_PREDICTIONS", "100"))
         ml_monitor_min_outcomes: int = int(os.getenv("ML_MONITOR_MIN_OUTCOMES", "20"))
+        news_min_relevance: float = float(os.getenv("NEWS_MIN_RELEVANCE", "0.35"))
+        news_analysis_lookback_days: int = int(os.getenv("NEWS_ANALYSIS_LOOKBACK_DAYS", "30"))
+        nlp_reprocess_days: int = int(os.getenv("NLP_REPROCESS_DAYS", "30"))
+        nlp_upgrade_per_asset_cycle: int = int(os.getenv("NLP_UPGRADE_PER_ASSET_CYCLE", "2"))
         testing: bool = os.getenv("TESTING", "false").lower() == "true"
         sms_enabled: bool = os.getenv("SMS_ENABLED", "false").lower() == "true"
         sms_serial_port: str = os.getenv("SMS_SERIAL_PORT", "/dev/ttyUSB0")

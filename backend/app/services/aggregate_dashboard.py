@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.mappers import asset_to_schema, news_to_schema, price_to_schema
+from app.mappers import asset_to_schema, price_to_schema
 from app.repositories.assets import get_asset
 from app.repositories.features import get_latest_feature_snapshot
 from app.repositories.forecasts import get_latest_forecasts
-from app.repositories.news import list_news
 from app.repositories.prices import list_prices
 from app.schemas.portfolio import CompareAssetRow, CompareAssetsResponse
 from app.schemas.thesis import AssetOverview
 from app.services.analytics import build_overview
+from app.services.news_features import list_news_for_analysis
 
 
 def build_asset_overview_for_ids(db: Session, asset_ids: list[str]) -> list[AssetOverview]:
@@ -20,7 +20,7 @@ def build_asset_overview_for_ids(db: Session, asset_ids: list[str]) -> list[Asse
         if asset_row is None:
             continue
         prices = [price_to_schema(row) for row in list_prices(db, asset_id)]
-        news = [news_to_schema(row) for row in list_news(db, asset_id)]
+        news = list_news_for_analysis(db, asset_id)
         if len(prices) < 21:
             continue
         rows.append(build_overview(asset_to_schema(asset_row), prices, news))

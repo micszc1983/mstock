@@ -1,7 +1,8 @@
 """
 scheduler.py — pełna automatyzacja ThesisLab.
 
-Pipeline uruchamia się co AUTO_SYNC_INTERVAL_MINUTES (domyślnie 60 min).
+Pełny pipeline uruchamia się co AUTO_SYNC_INTERVAL_MINUTES w dni robocze.
+W weekend działa lekki cykl newsów i NLP oraz jedno przygotowanie w niedzielę.
 
 Kolejność kroków (każdy chroniony osobnym try/except):
   Per aktywo:
@@ -32,6 +33,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
@@ -123,6 +125,14 @@ def _ml_retrain_auto() -> bool:
 
 # ── Kroki pipeline'u ─────────────────────────────────────────────────────────
 
+def _rollback_failed_step(db) -> None:
+    """Izoluje błąd kroku, żeby kolejne aktywa i etap ML nadal się wykonały."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
 def _step_sync_prices(db, asset: AssetORM, r: CycleReport) -> None:
     needs_price_sync = (
         asset.id in {"gold", "silver"}
@@ -137,6 +147,7 @@ def _step_sync_prices(db, asset: AssetORM, r: CycleReport) -> None:
         r.assets_synced += 1
         r.log(f"{asset.id}: ceny sync ({result.inserted} nowych)")
     except Exception as exc:
+        _rollback_failed_step(db)
         log_sync_error(db, asset.id, "prices", str(exc))
         r.err(f"sync_prices/{asset.id}", exc)
 
@@ -148,6 +159,7 @@ def _step_sync_news(db, asset: AssetORM, r: CycleReport) -> None:
         r.assets_news_synced += 1
         r.log(f"{asset.id}: newsy sync ({result.inserted} nowych)")
     except Exception as exc:
+        _rollback_failed_step(db)
         log_sync_error(db, asset.id, "news", str(exc))
         r.err(f"sync_news/{asset.id}", exc)
 
@@ -158,6 +170,7 @@ def _step_nlp_enrichment(db, asset: AssetORM, r: CycleReport) -> None:
         r.assets_enriched += 1
         r.log(f"{asset.id}: NLP enrichment ({enriched} newsów)")
     except Exception as exc:
+        _rollback_failed_step(db)
         r.err(f"nlp_enrichment/{asset.id}", exc)
 
 
@@ -168,6 +181,7 @@ def _step_rebuild_features(db, asset: AssetORM, r: CycleReport) -> None:
             r.assets_features_built += 1
             r.log(f"{asset.id}: features + forecasts rebuilt")
     except Exception as exc:
+        _rollback_failed_step(db)
         r.err(f"rebuild_features/{asset.id}", exc)
 
 
@@ -178,6 +192,7 @@ def _step_decision_snapshot(db, asset: AssetORM, r: CycleReport) -> None:
             r.assets_decisions_built += 1
             r.log(f"{asset.id}: decision snapshot ({snap.action_label})")
     except Exception as exc:
+        _rollback_failed_step(db)
         r.err(f"decision_snapshot/{asset.id}", exc)
 
 
@@ -188,6 +203,7 @@ def _step_outcomes(db, asset: AssetORM, r: CycleReport) -> None:
             r.assets_outcomes_evaluated += count
             r.log(f"{asset.id}: outcomes evaluated ({count})")
     except Exception as exc:
+        _rollback_failed_step(db)
         r.err(f"outcomes/{asset.id}", exc)
 
 
@@ -198,6 +214,7 @@ def _step_alerts(db, asset: AssetORM, r: CycleReport) -> None:
         if fired:
             r.log(f"{asset.id}: {fired} alert(ów) wygenerowanych")
     except Exception as exc:
+        _rollback_failed_step(db)
         r.err(f"alerts/{asset.id}", exc)
 
 
@@ -659,6 +676,56 @@ def run_periodic_sync() -> None:
             pass
         print(f"[scheduler] ═══ {r.summary()} ═══\n")
         scheduler_lock.release()
+
+
+def _is_warsaw_weekend(at: datetime | None = None) -> bool:
+    moment = at or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZoneInfo("Europe/Warsaw")).weekday() >= 5
+
+
+def _weekday_periodic_sync_job(at: datetime | None = None) -> bool:
+    """Run the expensive pipeline only Monday-Friday in Warsaw time."""
+    if _is_warsaw_weekend(at):
+        print("[scheduler] Weekend — pełny cykl pominięty; działa monitoring newsów.")
+        return False
+    run_periodic_sync()
+    return True
+
+
+def run_weekend_news_sync(at: datetime | None = None) -> CycleReport | None:
+    """Fetch and analyse news without touching prices, models or trading."""
+    if not _is_warsaw_weekend(at):
+        return None
+    if not scheduler_lock.acquire(blocking=False):
+        print("[weekend-news] Inny cykl nadal trwa — pomijam.")
+        return None
+
+    r = CycleReport()
+    print(f"\n[weekend-news] ═══ Start {r.started_at.strftime('%Y-%m-%d %H:%M:%S UTC')} ═══")
+    try:
+        with SessionLocal() as db:
+            assets = db.scalars(
+                select(AssetORM).order_by(AssetORM.name.asc())
+            ).all()
+            for asset in assets:
+                _step_sync_news(db, asset, r)
+                _step_nlp_enrichment(db, asset, r)
+    except Exception as exc:
+        r.errors.append(f"[fatal] {exc}")
+        print(f"[weekend-news] FATAL: {exc}")
+        traceback.print_exc()
+    finally:
+        r.finished_at = datetime.now(timezone.utc)
+        scheduler_lock.release()
+        elapsed = (r.finished_at - r.started_at).total_seconds()
+        print(
+            f"[weekend-news] ═══ Koniec w {elapsed:.1f}s | "
+            f"sync_news={r.assets_news_synced} enriched={r.assets_enriched} "
+            f"errors={len(r.errors)} ═══\n"
+        )
+    return r
 
 
 # ── Start / stop ─────────────────────────────────────────────────────────────
@@ -1201,10 +1268,31 @@ def start_scheduler() -> None:
     if scheduler.running:
         return
     scheduler.add_job(
-        run_periodic_sync,
+        _weekday_periodic_sync_job,
         "interval",
         minutes=settings.auto_sync_interval_minutes,
         id="full-pipeline",
+        replace_existing=True,
+    )
+    weekend_hours = max(1, min(12, int(settings.weekend_news_interval_hours)))
+    scheduler.add_job(
+        run_weekend_news_sync,
+        "cron",
+        day_of_week="sat,sun",
+        hour=f"*/{weekend_hours}",
+        minute=0,
+        timezone="Europe/Warsaw",
+        id="weekend-news",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_periodic_sync,
+        "cron",
+        day_of_week="sun",
+        hour=max(0, min(23, int(settings.sunday_prepare_hour))),
+        minute=30,
+        timezone="Europe/Warsaw",
+        id="sunday-prepare",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -1269,7 +1357,12 @@ def start_scheduler() -> None:
         )
         print("[scheduler] SMS polling co 5 min włączony")
     scheduler.start()
-    print(f"[scheduler] Uruchomiony — cykl co {settings.auto_sync_interval_minutes} min, fast-check co 15 min podczas sesji, raport portfela pn-pt o 22:10")
+    print(
+        f"[scheduler] Uruchomiony — pełny cykl pn-pt co {settings.auto_sync_interval_minutes} min; "
+        f"weekend newsy+NLP co {weekend_hours}h; niedzielne przygotowanie "
+        f"o {max(0, min(23, int(settings.sunday_prepare_hour))):02d}:30; "
+        "fast-check co 15 min podczas sesji; raport portfela pn-pt o 22:10"
+    )
 
 
 def stop_scheduler() -> None:

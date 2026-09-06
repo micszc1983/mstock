@@ -6,6 +6,8 @@ Używany jako fallback gdy transformers nie są zainstalowane.
 """
 from __future__ import annotations
 
+import re
+
 from app.schemas.common import AssetType, NarrativeLabel
 from app.services.nlp_backends.base import NLPBackend
 
@@ -16,10 +18,14 @@ def _clamp(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
 
 _POSITIVE = ["strong", "beats", "beat", "support", "growth", "record", "upgrades",
              "improves", "bullish", "surge", "rally", "outperform", "upgrade",
-             "profit", "revenue beat", "positive", "robust", "resilient"]
+             "profit", "revenue beat", "positive", "robust", "resilient",
+             "wzrost", "rośnie", "zysk", "rekord", "powyżej oczekiwań", "podwyższa prognozę",
+             "dywidenda", "kontrakt", "umowa", "poprawa", "mocne wyniki", "kupuj"]
 _NEGATIVE = ["risk", "miss", "missed", "cut", "pressure", "decline", "lawsuit",
              "weak", "bearish", "drop", "downgrade", "loss", "warning", "concern",
-             "uncertainty", "slump", "sell-off", "default", "bankruptcy"]
+             "uncertainty", "slump", "sell-off", "default", "bankruptcy",
+             "spadek", "strata", "poniżej oczekiwań", "obniża prognozę", "pozew",
+             "kara", "zadłużenie", "słabe wyniki", "ryzyko", "sprzedaj", "upadłość"]
 
 _HIGH_IMPACT = ["earnings", "guidance", "lawsuit", "fed", "tariff", "export",
                 "acquisition", "central bank", "rate hike", "rate cut", "gdp",
@@ -28,14 +34,16 @@ _HIGH_IMPACT = ["earnings", "guidance", "lawsuit", "fed", "tariff", "export",
 _FINANCIAL_TERMS = ["revenue", "earnings", "eps", "guidance", "margin", "capex",
                     "dividend", "buyback", "debt", "cash flow", "valuation",
                     "forward pe", "upgrade", "downgrade", "target price", "analyst",
-                    "fiscal", "quarterly", "annual report", "10-k", "10-q"]
+                    "fiscal", "quarterly", "annual report", "10-k", "10-q",
+                    "przychody", "wyniki", "zysk", "marża", "dywidenda", "prognoza",
+                    "raport okresowy", "raport bieżący", "akcje", "obligacje", "kontrakt"]
 
 
 class HeuristicNLPBackend(NLPBackend):
 
     @property
     def model_name(self) -> str:
-        return "heuristic_nlp_v3"
+        return "heuristic_nlp_v4_pl"
 
     def classify_sentiment(self, title: str, body: str) -> dict:
         text = f"{title} {body}".lower()
@@ -67,16 +75,16 @@ class HeuristicNLPBackend(NLPBackend):
                  "generative ai", "machine learning", "neural network"])
             hit(NarrativeLabel.MARGIN_PRESSURE,
                 ["margin", "cost pressure", "pricing pressure", "input cost",
-                 "supply chain cost", "gross margin"])
+                 "supply chain cost", "gross margin", "presja na marże", "wzrost kosztów", "marża"])
             hit(NarrativeLabel.DEMAND_STRENGTH,
                 ["demand", "orders", "growth", "capex", "backlog", "pipeline",
-                 "record revenue", "record orders"])
+                 "record revenue", "record orders", "popyt", "zamówienia", "wzrost", "rekordowe przychody", "kontrakt"])
             hit(NarrativeLabel.DEMAND_SLOWDOWN,
                 ["slowdown", "weak demand", "soft demand", "declining orders",
-                 "inventory build", "channel inventory"])
+                 "inventory build", "channel inventory", "spadek popytu", "słaby popyt", "spadek zamówień"])
             hit(NarrativeLabel.REGULATION_RISK,
                 ["regulation", "antitrust", "export restriction", "lawsuit",
-                 "probe", "investigation", "ban", "sanction", "compliance"])
+                 "probe", "investigation", "ban", "sanction", "compliance", "regulac", "pozew", "uokik", "knf", "kara"])
             hit(NarrativeLabel.VALUATION_STRETCH,
                 ["valuation", "overvalued", "multiple expansion", "premium",
                  "pe ratio", "expensive", "bubble"])
@@ -126,17 +134,26 @@ class HeuristicNLPBackend(NLPBackend):
         name_l = asset_name.lower()
         sym_l = symbol.lower()
 
-        score = 0.20  # base
+        score = 0.10
         # Wzmianka nazwy
         name_hits = text.count(name_l)
         if name_hits >= 1:
             score += 0.30 + min(0.10, (name_hits - 1) * 0.03)
         # Wzmianka symbolu
-        if f" {sym_l} " in f" {text} ":
-            score += 0.20
+        if re.search(rf"(?<![\w]){re.escape(sym_l)}(?![\w])", text):
+            score += 0.25
         # Wzmianka sektora
         if sector and sector.lower() in text:
-            score += 0.10
+            score += 0.12
+        # Dla ETF i nazw wielowyrazowych artykuł często opisuje temat funduszu,
+        # ale nie wymienia pełnej nazwy. Użyj istotnych tokenów nazwy/sektora.
+        generic = {"stock", "stocks", "ucits", "fund", "global", "technologies", "spółka", "akcje"}
+        subject_words = {
+            token for token in (f"{asset_name} {sector or ''}".lower().replace("/", " ").replace("&", " ").split())
+            if len(token) >= 4 and token not in generic
+        }
+        subject_hits = sum(1 for token in subject_words if token in text)
+        score += min(0.32, subject_hits * 0.08)
         # Gęstość języka finansowego
         fin_hits = sum(1 for term in _FINANCIAL_TERMS if term in text)
         score += min(0.15, fin_hits * 0.02)

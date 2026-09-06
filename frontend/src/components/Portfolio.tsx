@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Download, Plus, Trash2, Save } from "lucide-react";
+import { Send, Download, Plus, Trash2, Save, Pencil, X } from "lucide-react";
 import type { Asset } from "../lib/types";
+import "./Portfolio.css";
 
 type Position = {
   asset_id: string;
   quantity: number;
+  avg_buy_price: number | null;
+  purchase_date: string | null;
+  invested_amount: number | null;
+  cost_currency: "PLN";
+  updated_at: string;
+};
+
+type EditDraft = {
+  asset_id: string;
+  purchase_date: string;
+  quantity: string;
+  avg_buy_price: string;
 };
 
 type RecData = {
@@ -15,6 +28,15 @@ type RecData = {
   last_price: number | null;
   currency: string;
   intraday_signal: "BUY" | "SELL" | null;
+};
+
+type PortfolioValuation = {
+  asset_id: string;
+  source_currency: string;
+  fx_rate_to_pln: number;
+  last_price_source: number | null;
+  last_price_pln: number | null;
+  current_value_pln: number | null;
 };
 
 type Props = {
@@ -54,16 +76,40 @@ function formatValue(qty: number, price: number | null, currency: string) {
   return `${(qty * price).toLocaleString("pl-PL", { maximumFractionDigits: 0 })} ${currency}`;
 }
 
+function todayLocal() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function errorDetail(payload: unknown, fallback: string) {
+  if (
+    payload
+    && typeof payload === "object"
+    && "detail" in payload
+    && typeof (payload as { detail?: unknown }).detail === "string"
+  ) {
+    return (payload as { detail: string }).detail;
+  }
+  return fallback;
+}
+
 export function Portfolio({ apiBase, assets }: Props) {
   const [positions, setPositions]   = useState<Position[]>([]);
   const [recMap, setRecMap]         = useState<Record<string, RecData>>({});
+  const [valuationMap, setValuationMap] = useState<Record<string, PortfolioValuation>>({});
   const [loading, setLoading]       = useState(false);
   const [sending, setSending]       = useState(false);
   const [info, setInfo]             = useState<string | null>(null);
   const [editId, setEditId]         = useState<string | null>(null);
-  const [editQty, setEditQty]       = useState<Record<string, string>>({});
+  const [editDraft, setEditDraft]   = useState<EditDraft | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [addAssetId, setAddAssetId] = useState("");
-  const [addQty, setAddQty]         = useState("");
+  const [addDate, setAddDate]       = useState(todayLocal);
+  const [addAmount, setAddAmount]   = useState("");
+  const [addPrice, setAddPrice]     = useState("");
+  const [adding, setAdding]         = useState(false);
   const infoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showInfo(msg: string) {
@@ -76,12 +122,25 @@ export function Portfolio({ apiBase, assets }: Props) {
     setLoading(true);
     try {
       const r = await fetch(`${apiBase}/portfolio/positions`);
+      if (!r.ok) throw new Error("Nie udało się pobrać portfela.");
       const data: Position[] = await r.json();
       setPositions(data);
-      fetchRecs(data.map(p => p.asset_id));
+      await fetchValuations();
+      // Rekomendacje są informacją dodatkową. Nie blokuj nimi wyświetlenia
+      // salda i pozycji, bo ich obliczenie może potrwać kilka sekund.
+      void fetchRecs(data.map(p => p.asset_id));
+    } catch (error) {
+      showInfo(error instanceof Error ? error.message : "Nie udało się pobrać portfela.");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function fetchValuations() {
+    const response = await fetch(`${apiBase}/portfolio/valuations`);
+    if (!response.ok) return;
+    const rows: PortfolioValuation[] = await response.json();
+    setValuationMap(Object.fromEntries(rows.map(row => [row.asset_id, row])));
   }
 
   async function fetchRecs(ids: string[]) {
@@ -128,29 +187,117 @@ export function Portfolio({ apiBase, assets }: Props) {
   }
 
   useEffect(() => { fetchPositions(); }, [apiBase]);
+  useEffect(() => () => {
+    if (infoTimer.current) clearTimeout(infoTimer.current);
+  }, []);
 
-  async function savePosition(asset_id: string, quantity: number) {
-    await fetch(`${apiBase}/portfolio/positions/${asset_id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity, avg_buy_price: null }),
+  function beginEdit(position: Position) {
+    setEditId(position.asset_id);
+    setEditDraft({
+      asset_id: position.asset_id,
+      purchase_date: position.purchase_date ?? "",
+      quantity: String(position.quantity),
+      avg_buy_price: position.avg_buy_price === null ? "" : String(position.avg_buy_price),
     });
-    await fetchPositions();
-    showInfo(`Pozycja ${asset_id.toUpperCase()} zapisana.`);
+  }
+
+  function cancelEdit() {
+    setEditId(null);
+    setEditDraft(null);
+  }
+
+  async function saveEditedPosition() {
+    if (!editId || !editDraft) return;
+    const quantity = Number(editDraft.quantity.replace(",", "."));
+    const avgBuyPrice = editDraft.avg_buy_price.trim()
+      ? Number(editDraft.avg_buy_price.replace(",", "."))
+      : null;
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      showInfo("Ilość musi być większa od zera.");
+      return;
+    }
+    if (avgBuyPrice !== null && (!Number.isFinite(avgBuyPrice) || avgBuyPrice <= 0)) {
+      showInfo("Średnia cena zakupu musi być większa od zera.");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      const r = await fetch(`${apiBase}/portfolio/positions/${editId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          asset_id: editDraft.asset_id,
+          quantity,
+          avg_buy_price: avgBuyPrice,
+          purchase_date: editDraft.purchase_date || null,
+        }),
+      });
+      const payload = await r.json().catch(() => null);
+      if (!r.ok) {
+        showInfo(errorDetail(payload, "Nie udało się zapisać pozycji."));
+        return;
+      }
+      cancelEdit();
+      await fetchPositions();
+      showInfo(`Pozycja ${editDraft.asset_id.toUpperCase()} została zaktualizowana.`);
+    } catch {
+      showInfo("Brak połączenia z backendem — zmiany nie zostały zapisane.");
+    } finally {
+      setSavingEdit(false);
+    }
   }
 
   async function deletePosition(asset_id: string) {
-    await fetch(`${apiBase}/portfolio/positions/${asset_id}`, { method: "DELETE" });
+    if (!window.confirm(`Usunąć ${asset_id.toUpperCase()} z portfela?`)) return;
+    const r = await fetch(`${apiBase}/portfolio/positions/${asset_id}`, { method: "DELETE" });
+    if (!r.ok) {
+      showInfo("Nie udało się usunąć pozycji.");
+      return;
+    }
+    if (editId === asset_id) cancelEdit();
     await fetchPositions();
     showInfo(`Usunięto ${asset_id.toUpperCase()} z portfela.`);
   }
 
   async function addPosition() {
-    if (!addAssetId || !addQty) return;
-    const qty = parseFloat(addQty.replace(",", "."));
-    if (isNaN(qty) || qty <= 0) { showInfo("Nieprawidłowa ilość."); return; }
-    await savePosition(addAssetId, qty);
-    setAddAssetId(""); setAddQty("");
+    if (!addAssetId || !addDate || !addAmount) return;
+    const amount = parseFloat(addAmount.replace(",", "."));
+    const purchasePrice = addPrice.trim() ? parseFloat(addPrice.replace(",", ".")) : null;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showInfo("Kwota zakupu musi być większa od zera.");
+      return;
+    }
+    if (purchasePrice !== null && (!Number.isFinite(purchasePrice) || purchasePrice <= 0)) {
+      showInfo("Cena wykonania musi być większa od zera.");
+      return;
+    }
+    setAdding(true);
+    try {
+      const r = await fetch(`${apiBase}/portfolio/positions/${addAssetId}/historical-purchase`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          purchase_date: addDate,
+          invested_amount: amount,
+          purchase_price: purchasePrice,
+        }),
+      });
+      const payload = await r.json().catch(() => null);
+      if (!r.ok) {
+        showInfo(errorDetail(payload, "Nie udało się dodać zakupu."));
+        return;
+      }
+      await fetchPositions();
+      const wasExisting = positions.some(position => position.asset_id === addAssetId);
+      showInfo(`${wasExisting ? "Dokupiono" : "Dodano"} ${addAssetId.toUpperCase()} — średnia cena została przeliczona.`);
+      setAddAssetId("");
+      setAddAmount("");
+      setAddPrice("");
+    } catch {
+      showInfo("Brak połączenia z backendem — zakup nie został zapisany.");
+    } finally {
+      setAdding(false);
+    }
   }
 
   // Sort: SPRZEDAJ → KUP → TRZYMAJ → BRAK TRANSAKCJI
@@ -161,165 +308,180 @@ export function Portfolio({ apiBase, assets }: Props) {
     return (order[ra] ?? 2) - (order[rb] ?? 2);
   });
 
-  const totalByC: Record<string, number> = {};
+  const summaryByCurrency: Record<string, { invested: number; valuedInvested: number; current: number; missingPrices: number }> = {};
   for (const p of positions) {
-    const rd = recMap[p.asset_id];
-    if (!rd?.last_price) continue;
-    totalByC[rd.currency] = (totalByC[rd.currency] ?? 0) + p.quantity * rd.last_price;
+    const valuation = valuationMap[p.asset_id];
+    const currency = "PLN";
+    const invested = p.invested_amount ?? (p.avg_buy_price !== null ? p.quantity * p.avg_buy_price : 0);
+    const current = valuation?.current_value_pln ?? null;
+    const summary = summaryByCurrency[currency] ?? { invested: 0, valuedInvested: 0, current: 0, missingPrices: 0 };
+    summary.invested += invested;
+    if (current === null) {
+      summary.missingPrices += 1;
+    } else {
+      summary.current += current;
+      summary.valuedInvested += invested;
+    }
+    summaryByCurrency[currency] = summary;
   }
-
-  const assetsNotInPortfolio = assets.filter(a => !positions.some(p => p.asset_id === a.id));
+  const selectedAddPosition = positions.find(position => position.asset_id === addAssetId);
+  const editInvestedPreview = editDraft?.avg_buy_price.trim() && editDraft.quantity.trim()
+    ? Number(editDraft.avg_buy_price.replace(",", ".")) * Number(editDraft.quantity.replace(",", "."))
+    : null;
 
   return (
-    <div style={{ padding: "1.2rem 0" }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.8rem", marginBottom: "1.2rem", flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 700, color: "var(--text-1)" }}>Portfel inwestycyjny</h2>
-        <div style={{ flex: 1 }} />
-        {Object.entries(totalByC).map(([c, v]) => (
-          <span key={c} style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-1)", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 6, padding: "3px 10px" }}>
-            {v.toLocaleString("pl-PL", { maximumFractionDigits: 0 })} {c}
-          </span>
-        ))}
-        <button onClick={async () => {
-          const r = await fetch(`${apiBase}/portfolio/preview-report`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ to_email: "dev@coad.pl", recommendations: Object.fromEntries(positions.map(p => [p.asset_id, recMap[p.asset_id] ?? {}])) }),
-          });
-          if (!r.ok) { showInfo("Błąd generowania PDF"); return; }
-          const blob = await r.blob();
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a"); a.href = url; a.download = "mstock_portfel.pdf"; a.click();
-          URL.revokeObjectURL(url);
-        }} style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "5px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "var(--bg-subtle)", cursor: "pointer", fontSize: "0.83rem", color: "var(--text-2)" }}>
-          <Download size={14} /> Pobierz PDF
-        </button>
-        <button onClick={async () => {
-          setSending(true);
-          try {
-            const r = await fetch(`${apiBase}/portfolio/send-report`, {
+    <div className="portfolio-page">
+      <div className="portfolio-header">
+        <div>
+          <h2>Portfel inwestycyjny</h2>
+          <p>{positions.length} {positions.length === 1 ? "pozycja" : "pozycji"} · wszystkie wartości w PLN</p>
+        </div>
+        <div className="portfolio-header-actions">
+          <button className="portfolio-btn portfolio-btn-secondary" disabled={positions.length === 0} onClick={async () => {
+            const r = await fetch(`${apiBase}/portfolio/preview-report`, {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ to_email: "dev@coad.pl", recommendations: Object.fromEntries(positions.map(p => [p.asset_id, recMap[p.asset_id] ?? {}])) }),
             });
-            const d = await r.json();
-            showInfo(r.ok ? "Email wysłany na dev@coad.pl" : `Błąd: ${d.detail}`);
-          } finally { setSending(false); }
-        }} disabled={sending || positions.length === 0}
-          style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "5px 14px", borderRadius: 7, border: "none", background: sending ? "var(--bg-subtle)" : "var(--accent)", cursor: "pointer", fontSize: "0.83rem", color: sending ? "var(--text-3)" : "#fff", fontWeight: 600 }}>
-          <Send size={14} /> {sending ? "Wysyłanie…" : "Wyślij raport"}
-        </button>
+            if (!r.ok) { showInfo("Błąd generowania PDF"); return; }
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a"); link.href = url; link.download = "mstock_portfel.pdf"; link.click();
+            URL.revokeObjectURL(url);
+          }}><Download size={15} /> PDF</button>
+          <button className="portfolio-btn portfolio-btn-primary" disabled={sending || positions.length === 0} onClick={async () => {
+            setSending(true);
+            try {
+              const r = await fetch(`${apiBase}/portfolio/send-report`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ to_email: "dev@coad.pl", recommendations: Object.fromEntries(positions.map(p => [p.asset_id, recMap[p.asset_id] ?? {}])) }),
+              });
+              const d = await r.json().catch(() => ({}));
+              showInfo(r.ok ? "Email wysłany na dev@coad.pl" : `Błąd: ${d.detail ?? "nie udało się wysłać raportu"}`);
+            } finally { setSending(false); }
+          }}><Send size={15} /> {sending ? "Wysyłanie…" : "Wyślij raport"}</button>
+        </div>
       </div>
 
-      {info && (
-        <div style={{ marginBottom: "0.8rem", padding: "8px 14px", borderRadius: 7, background: "var(--bg-subtle)", border: "1px solid var(--border)", fontSize: "0.85rem", color: "var(--text-2)" }}>
-          {info}
+      {Object.entries(summaryByCurrency).length > 0 && (
+        <div className="portfolio-summary-grid">
+          {Object.entries(summaryByCurrency).map(([currency, values]) => {
+            const profit = values.current - values.valuedInvested;
+            const profitPct = values.valuedInvested > 0 ? profit / values.valuedInvested * 100 : null;
+            return (
+              <div className="portfolio-summary-card" key={currency}>
+                <div className="portfolio-summary-title">Portfel {currency}</div>
+                <div className="portfolio-summary-value">{values.current.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} {currency}</div>
+                <div className="portfolio-summary-meta">Wpłacono {values.invested.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} {currency}</div>
+                {values.valuedInvested > 0 && <div className={profit >= 0 ? "portfolio-profit" : "portfolio-loss"}>
+                    {profit >= 0 ? "+" : ""}{profit.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} {currency}
+                    {profitPct !== null ? ` (${profitPct >= 0 ? "+" : ""}${profitPct.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}%)` : ""}
+                  </div>}
+                {values.missingPrices > 0 && <div className="portfolio-summary-warning">Bez wyceny: {values.missingPrices}</div>}
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Dodaj pozycję */}
-      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.2rem", alignItems: "center", padding: "10px 14px", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: "0.82rem", color: "var(--text-3)", fontWeight: 600 }}>Dodaj:</span>
-        <select value={addAssetId} onChange={e => setAddAssetId(e.target.value)}
-          style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-card)", color: "var(--text-1)", fontSize: "0.83rem" }}>
-          <option value="">— wybierz aktywo —</option>
-          {assetsNotInPortfolio.map(a => <option key={a.id} value={a.id}>{a.symbol} — {a.name}</option>)}
-        </select>
-        <input type="number" placeholder="Ilość" value={addQty} onChange={e => setAddQty(e.target.value)}
-          style={{ width: 90, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-card)", color: "var(--text-1)", fontSize: "0.83rem" }} />
-        <button onClick={addPosition} disabled={!addAssetId || !addQty}
-          style={{ display: "flex", alignItems: "center", gap: "0.35rem", padding: "4px 14px", borderRadius: 6, border: "none", background: "var(--accent)", color: "#fff", fontSize: "0.83rem", fontWeight: 600, cursor: "pointer" }}>
-          <Plus size={13} /> Dodaj
-        </button>
-      </div>
+      {info && <div className="portfolio-notice" role="status">{info}</div>}
 
-      {/* Tabela */}
-      {loading ? (
-        <div style={{ color: "var(--text-3)", padding: "1rem" }}>Ładowanie…</div>
-      ) : sorted.length === 0 ? (
-        <div style={{ color: "var(--text-3)", padding: "2rem", textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>
-          Brak pozycji w portfelu. Dodaj pierwsze aktywo powyżej.
+      <section className="portfolio-panel">
+        <div className="portfolio-panel-heading">
+          <div><strong>{selectedAddPosition ? "Dokup aktywo" : "Dodaj zakup"}</strong><span>Nowy zakup istniejącego aktywa przeliczy średnią cenę.</span></div>
         </div>
+        <div className="portfolio-form-grid portfolio-add-grid">
+          <label className="portfolio-field portfolio-field-wide"><span>Aktywo</span>
+            <select value={addAssetId} onChange={e => setAddAssetId(e.target.value)}>
+              <option value="">— wybierz aktywo —</option>
+              {assets.map(a => <option key={a.id} value={a.id}>{a.symbol} — {a.name}{positions.some(p => p.asset_id === a.id) ? " (w portfelu)" : ""}</option>)}
+            </select>
+          </label>
+          <label className="portfolio-field"><span>Data zakupu</span><input type="date" max={todayLocal()} value={addDate} onChange={e => setAddDate(e.target.value)} /></label>
+          <label className="portfolio-field"><span>Kwota w PLN</span><input type="number" min="0" step="any" inputMode="decimal" placeholder="np. 5000 zł" value={addAmount} onChange={e => setAddAmount(e.target.value)} /></label>
+          <label className="portfolio-field"><span>Cena za sztukę w PLN <em>opcjonalnie</em></span><input type="number" min="0" step="any" inputMode="decimal" placeholder="z potwierdzenia" value={addPrice} onChange={e => setAddPrice(e.target.value)} /></label>
+          <button className="portfolio-btn portfolio-btn-primary portfolio-form-action" onClick={addPosition} disabled={!addAssetId || !addDate || !addAmount || adding}>
+            <Plus size={15} /> {adding ? "Zapisywanie…" : selectedAddPosition ? "Dokup" : "Dodaj"}
+          </button>
+        </div>
+        <div className="portfolio-help">Wszystkie kwoty zakupu podajesz w złotówkach. Bez ceny wykonania aplikacja przeliczy cenę zamknięcia kursem NBP z dnia zakupu.</div>
+      </section>
+
+      {editId && editDraft && (
+        <section className="portfolio-panel portfolio-edit-panel">
+          <div className="portfolio-panel-heading">
+            <div><strong>Edytuj pozycję</strong><span>Zmiana zapisze całą pozycję i automatycznie przeliczy zainwestowaną kwotę.</span></div>
+            <button className="portfolio-icon-btn" onClick={cancelEdit} aria-label="Zamknij edycję"><X size={17} /></button>
+          </div>
+          <div className="portfolio-form-grid portfolio-edit-grid">
+            <label className="portfolio-field portfolio-field-wide"><span>Aktywo</span>
+              <select value={editDraft.asset_id} onChange={e => setEditDraft({ ...editDraft, asset_id: e.target.value })}>
+                {assets.map(a => <option key={a.id} value={a.id}>{a.symbol} — {a.name}</option>)}
+              </select>
+            </label>
+            <label className="portfolio-field"><span>Data pierwszego zakupu</span><input type="date" max={todayLocal()} value={editDraft.purchase_date} onChange={e => setEditDraft({ ...editDraft, purchase_date: e.target.value })} /></label>
+            <label className="portfolio-field"><span>Liczba sztuk</span><input type="number" min="0" step="any" inputMode="decimal" value={editDraft.quantity} onChange={e => setEditDraft({ ...editDraft, quantity: e.target.value })} /></label>
+            <label className="portfolio-field"><span>Średnia cena zakupu w PLN</span><input type="number" min="0" step="any" inputMode="decimal" value={editDraft.avg_buy_price} onChange={e => setEditDraft({ ...editDraft, avg_buy_price: e.target.value })} /></label>
+            <div className="portfolio-edit-preview"><span>Zainwestowano po zmianie</span><strong>{Number.isFinite(editInvestedPreview) && editInvestedPreview !== null ? editInvestedPreview.toLocaleString("pl-PL", { maximumFractionDigits: 2 }) : "—"} PLN</strong></div>
+          </div>
+          <div className="portfolio-edit-actions">
+            <button className="portfolio-btn portfolio-btn-secondary" onClick={cancelEdit}>Anuluj</button>
+            <button className="portfolio-btn portfolio-btn-primary" onClick={saveEditedPosition} disabled={savingEdit}><Save size={15} /> {savingEdit ? "Zapisywanie…" : "Zapisz zmiany"}</button>
+          </div>
+        </section>
+      )}
+
+      {loading ? <div className="portfolio-empty">Ładowanie portfela…</div> : sorted.length === 0 ? (
+        <div className="portfolio-empty">Brak pozycji w portfelu. Dodaj pierwszy zakup powyżej.</div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
-            <thead>
-              <tr style={{ background: "var(--bg-subtle)", borderBottom: "2px solid var(--border)" }}>
-                {["Sygnał", "Aktywo", "Symbol", "Ilość", "Cena", "Wartość", "Rekomendacja", "ML", "5d", "20d", "Intraday", ""].map((h, i) => (
-                  <th key={i} style={{ padding: "7px 10px", textAlign: ["Ilość","Cena","Wartość"].includes(h) ? "right" : "left", fontWeight: 600, fontSize: "0.78rem", color: "var(--text-3)", whiteSpace: "nowrap" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((pos, i) => {
-                const asset  = assets.find(a => a.id === pos.asset_id);
-                const rd     = recMap[pos.asset_id] ?? {} as RecData;
-                const dot    = signalDot(rd.recommendation, rd.ml_prediction, rd.forecast_dir_5d, rd.forecast_dir_20d);
-                const badge  = recBadge(rd.recommendation);
-                const isEdit = editId === pos.asset_id;
+        <>
+          <div className="portfolio-table-wrap">
+            <table className="portfolio-table">
+              <thead><tr>{["", "Aktywo", "Zakup", "Koszt", "Wartość teraz", "Wynik", "Rekomendacja", "Prognozy", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
+              <tbody>{sorted.map(pos => {
+                const asset = assets.find(a => a.id === pos.asset_id);
+                const rd = recMap[pos.asset_id] ?? {} as RecData;
+                const valuation = valuationMap[pos.asset_id];
+                const badge = recBadge(rd.recommendation);
+                const currency = "PLN";
+                const invested = pos.invested_amount ?? (pos.avg_buy_price !== null ? pos.quantity * pos.avg_buy_price : null);
+                const currentValue = valuation?.current_value_pln ?? null;
+                const currentPrice = valuation?.last_price_pln ?? null;
+                const profit = invested !== null && currentValue !== null ? currentValue - invested : null;
+                const profitPct = profit !== null && invested && invested > 0 ? profit / invested * 100 : null;
+                return <tr key={pos.asset_id} className={editId === pos.asset_id ? "portfolio-row-editing" : ""}>
+                  <td className="portfolio-signal">{signalDot(rd.recommendation, rd.ml_prediction, rd.forecast_dir_5d, rd.forecast_dir_20d)}</td>
+                  <td><strong>{asset?.symbol ?? pos.asset_id.toUpperCase()}</strong><span>{asset?.name ?? pos.asset_id}</span></td>
+                  <td><strong>{pos.quantity.toLocaleString("pl-PL", { maximumFractionDigits: 6 })} szt.</strong><span>{pos.purchase_date ? new Date(`${pos.purchase_date}T12:00:00`).toLocaleDateString("pl-PL") : "brak daty"}</span></td>
+                  <td><strong>{formatPrice(pos.avg_buy_price, currency)}</strong><span>{invested !== null ? `${invested.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} ${currency}` : "brak ceny zakupu"}</span></td>
+                  <td><strong>{formatValue(pos.quantity, currentPrice, currency)}</strong><span>{formatPrice(currentPrice, currency)} / szt.{valuation?.source_currency !== "PLN" && valuation?.fx_rate_to_pln ? ` · 1 ${valuation.source_currency} = ${valuation.fx_rate_to_pln.toFixed(4)} PLN` : ""}</span></td>
+                  <td className={profit === null ? "" : profit >= 0 ? "portfolio-profit" : "portfolio-loss"}><strong>{profit !== null ? `${profit >= 0 ? "+" : ""}${profit.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} ${currency}` : "—"}</strong><span>{profitPct !== null ? `${profitPct >= 0 ? "+" : ""}${profitPct.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}%` : "brak danych"}</span></td>
+                  <td><span className="portfolio-rec-badge" style={{ background: badge.bg, color: badge.color }}>{badge.label}</span></td>
+                  <td><div className="portfolio-forecast"><span>ML {arrowDir(rd.ml_prediction)}</span><span>5d {arrowDir(rd.forecast_dir_5d)}</span><span>20d {arrowDir(rd.forecast_dir_20d)}</span><span>Intra {arrowDir(rd.intraday_signal === "BUY" ? "up" : rd.intraday_signal === "SELL" ? "down" : null)}</span></div></td>
+                  <td><div className="portfolio-row-actions"><button className="portfolio-icon-btn" onClick={() => beginEdit(pos)} title="Edytuj całą pozycję"><Pencil size={15} /></button><button className="portfolio-icon-btn portfolio-delete-btn" onClick={() => deletePosition(pos.asset_id)} title="Usuń pozycję"><Trash2 size={15} /></button></div></td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
 
-                return (
-                  <tr key={pos.asset_id} style={{ borderBottom: "1px solid var(--border)", background: i % 2 === 0 ? "var(--bg-card)" : "transparent" }}>
-                    <td style={{ padding: "7px 10px", fontSize: "1rem", textAlign: "center" }}>{dot}</td>
-                    <td style={{ padding: "7px 10px", fontWeight: 500, whiteSpace: "nowrap" }}>{asset?.name ?? pos.asset_id}</td>
-                    <td style={{ padding: "7px 10px", color: "var(--text-3)", fontFamily: "monospace" }}>{asset?.symbol ?? pos.asset_id.toUpperCase()}</td>
-                    <td style={{ padding: "7px 10px", textAlign: "right" }}>
-                      {isEdit ? (
-                        <input type="number" value={editQty[pos.asset_id] ?? String(pos.quantity)}
-                          onChange={e => setEditQty(q => ({ ...q, [pos.asset_id]: e.target.value }))}
-                          style={{ width: 80, padding: "2px 6px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--bg-card)", color: "var(--text-1)", fontSize: "0.83rem", textAlign: "right" }} />
-                      ) : (
-                        <span style={{ fontVariantNumeric: "tabular-nums" }}>{pos.quantity.toLocaleString("pl-PL")}</span>
-                      )}
-                    </td>
-                    <td style={{ padding: "7px 10px", textAlign: "right", color: "var(--text-2)", fontVariantNumeric: "tabular-nums" }}>{formatPrice(rd.last_price ?? null, rd.currency ?? "USD")}</td>
-                    <td style={{ padding: "7px 10px", textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatValue(pos.quantity, rd.last_price ?? null, rd.currency ?? "USD")}</td>
-                    <td style={{ padding: "7px 10px" }}>
-                      <span style={{ padding: "2px 8px", borderRadius: 5, background: badge.bg, color: badge.color, fontWeight: 700, fontSize: "0.78rem" }}>{badge.label}</span>
-                    </td>
-                    <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.ml_prediction === "up" ? "up" : rd.ml_prediction === "down" ? "down" : null)}</td>
-                    <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.forecast_dir_5d)}</td>
-                    <td style={{ padding: "7px 10px", textAlign: "center" }}>{arrowDir(rd.forecast_dir_20d)}</td>
-                    <td style={{ padding: "7px 10px", textAlign: "center" }}>
-                      {rd.intraday_signal === "BUY"
-                        ? <span title="Sygnał intraday: KUP" style={{ color: "#16a34a", fontWeight: 700, fontSize: "0.9rem" }}>▲</span>
-                        : rd.intraday_signal === "SELL"
-                          ? <span title="Sygnał intraday: SPRZEDAJ" style={{ color: "#dc2626", fontWeight: 700, fontSize: "0.9rem" }}>▼</span>
-                          : <span style={{ color: "var(--text-3)" }}>—</span>}
-                    </td>
-                    <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
-                      {isEdit ? (
-                        <>
-                          <button onClick={async () => {
-                            const qty = parseFloat((editQty[pos.asset_id] ?? String(pos.quantity)).replace(",", "."));
-                            await savePosition(pos.asset_id, qty);
-                            setEditId(null);
-                          }} style={{ padding: "3px 8px", borderRadius: 5, border: "none", background: "var(--accent)", color: "#fff", fontSize: "0.78rem", cursor: "pointer", marginRight: 4 }}>
-                            <Save size={11} style={{ verticalAlign: "middle" }} /> Zapisz
-                          </button>
-                          <button onClick={() => setEditId(null)}
-                            style={{ padding: "3px 8px", borderRadius: 5, border: "1px solid var(--border)", background: "var(--bg-subtle)", color: "var(--text-2)", fontSize: "0.78rem", cursor: "pointer" }}>
-                            Anuluj
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button onClick={() => { setEditId(pos.asset_id); setEditQty(q => ({ ...q, [pos.asset_id]: String(pos.quantity) })); }}
-                            style={{ padding: "3px 8px", borderRadius: 5, border: "1px solid var(--border)", background: "var(--bg-subtle)", color: "var(--text-2)", fontSize: "0.78rem", cursor: "pointer", marginRight: 4 }}>
-                            Edytuj
-                          </button>
-                          <button onClick={() => deletePosition(pos.asset_id)}
-                            style={{ padding: "3px 7px", borderRadius: 5, border: "1px solid rgba(220,38,38,0.3)", background: "rgba(220,38,38,0.07)", color: "#dc2626", fontSize: "0.78rem", cursor: "pointer" }}>
-                            <Trash2 size={11} />
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+          <div className="portfolio-mobile-list">{sorted.map(pos => {
+            const asset = assets.find(a => a.id === pos.asset_id);
+            const rd = recMap[pos.asset_id] ?? {} as RecData;
+            const valuation = valuationMap[pos.asset_id];
+            const badge = recBadge(rd.recommendation);
+            const currency = "PLN";
+            const invested = pos.invested_amount ?? (pos.avg_buy_price !== null ? pos.quantity * pos.avg_buy_price : null);
+            const currentValue = valuation?.current_value_pln ?? null;
+            const currentPrice = valuation?.last_price_pln ?? null;
+            const profit = invested !== null && currentValue !== null ? currentValue - invested : null;
+            const profitPct = profit !== null && invested && invested > 0 ? profit / invested * 100 : null;
+            return <article className={`portfolio-mobile-card ${editId === pos.asset_id ? "portfolio-row-editing" : ""}`} key={pos.asset_id}>
+              <div className="portfolio-mobile-head"><div className="portfolio-signal">{signalDot(rd.recommendation, rd.ml_prediction, rd.forecast_dir_5d, rd.forecast_dir_20d)}</div><div><strong>{asset?.symbol ?? pos.asset_id.toUpperCase()}</strong><span>{asset?.name ?? pos.asset_id}</span></div><span className="portfolio-rec-badge" style={{ background: badge.bg, color: badge.color }}>{badge.label}</span></div>
+              <div className="portfolio-mobile-metrics"><div><span>Wartość</span><strong>{formatValue(pos.quantity, currentPrice, currency)}</strong></div><div><span>Wynik</span><strong className={profit === null ? "" : profit >= 0 ? "portfolio-profit" : "portfolio-loss"}>{profit !== null ? `${profit >= 0 ? "+" : ""}${profit.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} ${currency}` : "—"}</strong><small>{profitPct !== null ? `${profitPct >= 0 ? "+" : ""}${profitPct.toLocaleString("pl-PL", { maximumFractionDigits: 1 })}%` : ""}</small></div></div>
+              <div className="portfolio-mobile-details"><span>{pos.quantity.toLocaleString("pl-PL", { maximumFractionDigits: 6 })} szt. × {formatPrice(pos.avg_buy_price, currency)}</span><span>{pos.purchase_date ? new Date(`${pos.purchase_date}T12:00:00`).toLocaleDateString("pl-PL") : "brak daty zakupu"}</span><span>Wpłacono: {invested !== null ? `${invested.toLocaleString("pl-PL", { maximumFractionDigits: 2 })} ${currency}` : "—"}</span>{valuation?.source_currency !== "PLN" && valuation?.fx_rate_to_pln ? <span>Kurs: 1 {valuation.source_currency} = {valuation.fx_rate_to_pln.toFixed(4)} PLN</span> : null}</div>
+              <div className="portfolio-mobile-footer"><div className="portfolio-forecast"><span>ML {arrowDir(rd.ml_prediction)}</span><span>5d {arrowDir(rd.forecast_dir_5d)}</span><span>20d {arrowDir(rd.forecast_dir_20d)}</span><span>Intra {arrowDir(rd.intraday_signal === "BUY" ? "up" : rd.intraday_signal === "SELL" ? "down" : null)}</span></div><div className="portfolio-row-actions"><button className="portfolio-btn portfolio-btn-secondary" onClick={() => beginEdit(pos)}><Pencil size={14} /> Edytuj</button><button className="portfolio-icon-btn portfolio-delete-btn" onClick={() => deletePosition(pos.asset_id)} aria-label="Usuń pozycję"><Trash2 size={15} /></button></div></div>
+            </article>;
+          })}</div>
+        </>
       )}
     </div>
   );

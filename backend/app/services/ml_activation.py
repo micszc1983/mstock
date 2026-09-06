@@ -21,6 +21,12 @@ from app.utils.datetime import ensure_utc, now_utc
 
 
 _EMERGENCY_KEY = "ml_emergency_disabled"
+LIVE_DECISION_TARGETS = frozenset({
+    "target_up_5d",
+    "target_up_20d",
+    "target_triple_barrier",
+    "target_meta_label",
+})
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,18 @@ def activation_decision(
     )
     if monitor.is_degraded:
         return ActivationDecision(run.id, False, "degraded", "drift lub degradacja wyników", **common)
+    try:
+        monitor_details = json.loads(monitor.details_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        monitor_details = {}
+    if monitor_details.get("drift_ready") is False:
+        return ActivationDecision(
+            run.id, False, "shadow", "za mało aktualnych cech do oceny driftu", **common,
+        )
+    if monitor_details.get("drift_confirmation_pending"):
+        return ActivationDecision(
+            run.id, False, "shadow", "oczekuje na potwierdzenie driftu", **common,
+        )
     checked_at = ensure_utc(monitor.checked_at)
     max_age_minutes = max(180, int(getattr(settings, "auto_sync_interval_minutes", 60)) * 3)
     if now_utc() - checked_at > timedelta(minutes=max_age_minutes):
@@ -156,6 +174,7 @@ def automatic_activation_summary(db: Session) -> dict:
         select(MLModelRunORM).where(
             MLModelRunORM.is_active.is_(True),
             MLModelRunORM.deployment_role == "champion",
+            MLModelRunORM.target_name.in_(LIVE_DECISION_TARGETS),
         )
     ).all())
     monitors = _latest_monitor_map(db)
@@ -167,6 +186,13 @@ def automatic_activation_summary(db: Session) -> dict:
     eligible = sum(decision.eligible for decision in decisions)
     degraded = sum(decision.state == "degraded" for decision in decisions)
     shadow = len(decisions) - eligible - degraded
+    # Widoczny licznik ma pokazywać, że wyniki faktycznie dojrzewają również
+    # wtedy, gdy model pozostaje zablokowany z innego powodu (np. driftu).
+    # Samo osiągnięcie minimum nadal nie omija żadnej bramki jakości.
+    outcome_samples = max(
+        (decision.sample_size for decision in decisions),
+        default=0,
+    )
     mode = (
         "emergency_off" if disabled else
         "heuristic" if eligible == 0 else
@@ -181,6 +207,8 @@ def automatic_activation_summary(db: Session) -> dict:
         "eligible_models": eligible,
         "shadow_models": shadow,
         "degraded_models": degraded,
+        "outcome_samples": outcome_samples,
+        "min_outcome_samples": settings.ml_monitor_min_outcomes,
         "decisions": decisions,
     }
 

@@ -13,7 +13,11 @@ function money(value: number, currency: string) {
 export function PaperTradingTab({ assets, selectedAssetId }: Props) {
   const selected = assets.find((asset) => asset.id === selectedAssetId);
   const selectedCurrency = selected?.currency ?? "USD";
-  const currencies = Array.from(new Set(assets.map((asset) => asset.currency).filter(Boolean))).sort();
+  const currencies = Array.from(new Set([
+    "PLN",
+    "USD",
+    ...assets.map((asset) => asset.currency).filter(Boolean),
+  ])).sort();
   const [currency, setCurrency] = useState(selectedCurrency);
   const storageKey = `mstock-paper-account-${currency}`;
   const [account, setAccount] = useState<PaperAccount | null>(null);
@@ -40,26 +44,26 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
     let cancelled = false;
     setAccount(null);
     setJournal(emptyJournal);
+    setMessage("");
     async function restore() {
       const stored = Number(window.localStorage.getItem(storageKey));
       if (stored > 0) {
         try {
-          await refresh(stored);
-          return;
+          const snapshot = await api.paperAccount(stored);
+          if (snapshot.currency === currency) {
+            if (!cancelled) await refresh(stored);
+            return;
+          }
+          window.localStorage.removeItem(storageKey);
         } catch {
           window.localStorage.removeItem(storageKey);
         }
       }
       try {
-        let accounts = await api.paperAccounts(currency);
-        if (!accounts.length) accounts = await api.paperAccounts();
+        const accounts = await api.paperAccounts(currency);
         const snapshot = accounts.find((item) => item.name === `paper-${currency.toLowerCase()}`) ?? accounts[0];
         if (!snapshot || cancelled) return;
         window.localStorage.setItem(`mstock-paper-account-${snapshot.currency}`, String(snapshot.id));
-        if (snapshot.currency !== currency) {
-          setCurrency(snapshot.currency);
-          return;
-        }
         await refresh(snapshot.id);
       } catch {
         // Brak istniejącego rachunku — pokaż formularz tworzenia.
@@ -148,6 +152,8 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
   const card: React.CSSProperties = {
     background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: 16,
   };
+  const accountCurrency = account?.currency ?? currency;
+  const selectedMatchesAccount = !selected || selected.currency === accountCurrency;
 
   return (
     <div style={{ padding: "16px 0" }}>
@@ -158,38 +164,56 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
         Nowe wejście wymaga zamkniętej świecy dziennej i dwóch kolejnych zgodnych cykli.
       </p>
 
+      <div style={{ ...card, marginBottom: 14 }}>
+        <div style={{ fontSize: 12, color: "var(--text-3)", marginBottom: 8 }}>Rachunek i rynek</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {currencies.map((value) => (
+            <button
+              key={value}
+              type="button"
+              disabled={busy}
+              onClick={() => setCurrency(value)}
+              aria-pressed={currency === value}
+              style={currency === value ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}
+            >
+              {value === "PLN" ? "GPW · PLN" : value === "USD" ? "Globalne i ETF · USD" : value}
+            </button>
+          ))}
+        </div>
+        <div style={{ color: "var(--text-3)", fontSize: 12, marginTop: 8 }}>
+          Konta mają oddzielny kapitał, pozycje, koszyki i dzienniki. Aktywne strategie działają równolegle na serwerze.
+        </div>
+      </div>
+
       {!account ? (
         <div style={{ ...card, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <label>Waluta </label>
-          <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
-            {(currencies.length ? currencies : ["USD"]).map((value) => <option key={value}>{value}</option>)}
-          </select>
+          <strong>Nowe konto {currency === "PLN" ? "GPW" : "globalne"}</strong>
           <label>Kapitał początkowy ({currency}) </label>
           <input type="number" min="1" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} />
-          <button disabled={busy || Number(initialCash) <= 0} onClick={createAccount}>Utwórz konto</button>
+          <button disabled={busy || Number(initialCash) <= 0} onClick={createAccount}>Utwórz konto {currency}</button>
         </div>
       ) : (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
             {[
-              ["Kapitał", money(account.equity, currency)],
-              ["Gotówka", money(account.cash, currency)],
-              ["Wartość pozycji", money(account.market_value, currency)],
+              ["Kapitał", money(account.equity, accountCurrency)],
+              ["Gotówka", money(account.cash, accountCurrency)],
+              ["Wartość pozycji", money(account.market_value, accountCurrency)],
               ["Wynik", `${account.total_return_pct >= 0 ? "+" : ""}${account.total_return_pct.toFixed(2)}%`],
-              ["Niezrealizowany P/L", money(account.unrealized_pnl, currency)],
+              ["Niezrealizowany P/L", money(account.unrealized_pnl, accountCurrency)],
             ].map(([label, value]) => <div key={label} style={card}><small style={{ color: "var(--text-3)" }}>{label}</small><div style={{ fontWeight: 700, marginTop: 5 }}>{value}</div></div>)}
           </div>
 
           {!account.strategy ? <div style={{ ...card, marginTop: 14 }}>
             <h3 style={{ marginTop: 0, marginBottom: 6 }}>Automatyczna inwestycja według rekomendacji</h3>
             <p style={{ color: "var(--text-3)", fontSize: 13, marginTop: 0 }}>
-              Każda kwota zostanie przeznaczona na inne, najwyżej ocenione aktywo z rekomendacją KUP w walucie {currency}.
+              Każda kwota zostanie przeznaczona na inne, najwyżej ocenione aktywo z rekomendacją KUP w walucie {accountCurrency}.
               Jeśli dobrych kandydatów będzie mniej, niewykorzystana kwota pozostanie w gotówce.
             </p>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
               {amounts.map((amount, index) => (
                 <label key={index} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  <span style={{ fontSize: 12, color: "var(--text-3)" }}>Pozycja {index + 1} ({currency})</span>
+                  <span style={{ fontSize: 12, color: "var(--text-3)" }}>Pozycja {index + 1} ({accountCurrency})</span>
                   <span style={{ display: "flex", gap: 6 }}>
                     <input
                       aria-label={`Kwota pozycji ${index + 1}`}
@@ -207,7 +231,7 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
               <button type="button" disabled={amounts.length >= 20} onClick={() => setAmounts((current) => [...current, "1000"])}>+ Dodaj kwotę</button>
-              <strong>Suma: {money(amountsTotal, currency)}</strong>
+              <strong>Suma: {money(amountsTotal, accountCurrency)}</strong>
               <button
                 type="button"
                 disabled={busy || !amountsValid || amountsTotal > account.cash}
@@ -236,7 +260,7 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
             <div style={{ overflowX: "auto" }}><table><thead><tr><th>Koszyk</th><th>Kwota początkowa</th><th>Stan</th><th>Sygnał</th><th>Aktywo</th><th>Ilość</th><th>Gotówka</th><th>Wartość</th><th>Wynik</th></tr></thead><tbody>
               {account.strategy.buckets.map((bucket) => <tr key={bucket.id}>
                 <td>{bucket.ordinal}</td>
-                <td>{money(bucket.initial_amount, currency)}</td>
+                <td>{money(bucket.initial_amount, accountCurrency)}</td>
                 <td>{bucket.status === "position" ? "Pozycja" : bucket.signal_status === "confirming" ? "Potwierdzanie" : "Oczekuje"}</td>
                 <td title={bucket.signal_message} style={{
                   color: bucket.signal_status === "entry_active" ? "#16a34a"
@@ -247,8 +271,8 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
                 }}>{bucket.signal_message}</td>
                 <td>{(bucket.asset_id ?? bucket.pending_asset_id)?.toUpperCase() ?? "—"}</td>
                 <td>{bucket.quantity ? bucket.quantity.toLocaleString("pl-PL", { maximumFractionDigits: 8 }) : "—"}</td>
-                <td>{money(bucket.cash, currency)}</td>
-                <td>{money(bucket.value, currency)}</td>
+                <td>{money(bucket.cash, accountCurrency)}</td>
+                <td>{money(bucket.value, accountCurrency)}</td>
                 <td style={{ color: bucket.return_pct >= 0 ? "#16a34a" : "#dc2626" }}>{bucket.return_pct >= 0 ? "+" : ""}{bucket.return_pct.toFixed(2)}%</td>
               </tr>)}
             </tbody></table></div>
@@ -257,8 +281,11 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
           {!account.strategy && <div style={{ ...card, marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <strong>{selected?.symbol ?? selectedAssetId}</strong>
             <input type="number" min="0.000001" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} style={{ width: 110 }} />
-            <button disabled={busy || Number(quantity) <= 0} onClick={() => place("buy")}>Kup</button>
-            <button disabled={busy || Number(quantity) <= 0} onClick={() => place("sell")}>Sprzedaj</button>
+            <button disabled={busy || Number(quantity) <= 0 || !selectedMatchesAccount} onClick={() => place("buy")}>Kup</button>
+            <button disabled={busy || Number(quantity) <= 0 || !selectedMatchesAccount} onClick={() => place("sell")}>Sprzedaj</button>
+            {!selectedMatchesAccount && <span style={{ color: "#b45309", fontSize: 13 }}>
+              Wybrane aktywo jest w {selected?.currency}; przełącz rachunek na tę walutę.
+            </span>}
             {message && <span style={{ color: "var(--text-2)", fontSize: 13 }}>{message}</span>}
           </div>}
 
@@ -266,13 +293,13 @@ export function PaperTradingTab({ assets, selectedAssetId }: Props) {
 
           <h3>Pozycje</h3>
           <div style={{ overflowX: "auto" }}><table><thead><tr><th>Aktywo</th><th>Ilość</th><th>Śr. cena</th><th>Ostatnia</th><th>P/L</th></tr></thead><tbody>
-            {account.positions.map((position) => <tr key={position.asset_id}><td>{position.asset_id.toUpperCase()}</td><td>{position.quantity}</td><td>{money(position.avg_price, currency)}</td><td>{money(position.last_price, currency)}</td><td>{money(position.unrealized_pnl, currency)}</td></tr>)}
+            {account.positions.map((position) => <tr key={position.asset_id}><td>{position.asset_id.toUpperCase()}</td><td>{position.quantity}</td><td>{money(position.avg_price, accountCurrency)}</td><td>{money(position.last_price, accountCurrency)}</td><td>{money(position.unrealized_pnl, accountCurrency)}</td></tr>)}
             {!account.positions.length && <tr><td colSpan={5}>Brak otwartych pozycji.</td></tr>}
           </tbody></table></div>
 
           <h3>Dziennik zleceń</h3>
           <div style={{ overflowX: "auto" }}><table><thead><tr><th>Czas</th><th>Aktywo</th><th>Strona</th><th>Ilość</th><th>Status</th><th>Cena</th><th>Koszt</th></tr></thead><tbody>
-            {journal.orders.map((order) => <tr key={order.id}><td>{new Date(order.submitted_at).toLocaleString("pl-PL")}</td><td>{order.asset_id.toUpperCase()}</td><td>{order.side === "buy" ? "KUP" : "SPRZEDAJ"}</td><td>{order.quantity}</td><td>{order.status}</td><td>{order.fill_price == null ? "—" : money(order.fill_price, currency)}</td><td>{money(order.commission + order.slippage, currency)}</td></tr>)}
+            {journal.orders.map((order) => <tr key={order.id}><td>{new Date(order.submitted_at).toLocaleString("pl-PL")}</td><td>{order.asset_id.toUpperCase()}</td><td>{order.side === "buy" ? "KUP" : "SPRZEDAJ"}</td><td>{order.quantity}</td><td>{order.status}</td><td>{order.fill_price == null ? "—" : money(order.fill_price, accountCurrency)}</td><td>{money(order.commission + order.slippage, accountCurrency)}</td></tr>)}
             {!journal.orders.length && <tr><td colSpan={7}>Dziennik jest pusty.</td></tr>}
           </tbody></table></div>
         </>

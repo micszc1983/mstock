@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select, exists
 from sqlalchemy.orm import Session
 
 from app.db.models import NewsItemORM, NewsNLPRunORM
 from app.mappers import asset_to_schema, news_to_schema
 from app.repositories.assets import get_asset
-from app.repositories.news import list_news
 from app.repositories.nlp import (
-    delete_nlp_for_news,
     get_latest_nlp_run,
     insert_narrative_prediction,
     insert_nlp_run,
@@ -17,28 +17,61 @@ from app.repositories.nlp import (
 from app.schemas.common import AssetType
 from app.schemas.nlp import NewsNLPResponse, NewsNarrativePredictionResponse
 from app.services.nlp import build_nlp_payload
+from app.services.nlp_backends.registry import get_nlp_backend
+from app.core.config import settings
+from app.utils.datetime import now_utc
 
 
-def enrich_news_for_asset(db: Session, asset_id: str, limit: int = 100) -> int:
+def enrich_news_for_asset(
+    db: Session,
+    asset_id: str,
+    limit: int = 100,
+    *,
+    upgrade_limit: int | None = None,
+) -> int:
     asset_row = get_asset(db, asset_id)
     if asset_row is None:
         return 0
 
     asset = asset_to_schema(asset_row)
 
-    # Pobierz tylko newsy BEZ istniejącego NLP run — stopniowo nadrabia zaległości
-    unenriched_rows = db.scalars(
+    model_name = get_nlp_backend().model_name
+    has_any_run = exists().where(NewsNLPRunORM.news_id == NewsItemORM.id)
+    has_current_run = exists().where(
+        NewsNLPRunORM.news_id == NewsItemORM.id,
+        NewsNLPRunORM.model_name == model_name,
+    )
+
+    # Najpierw zawsze nowe artykuły. Potem mała, kontrolowana paczka świeżych
+    # artykułów przetworzonych starszym modelem — bez blokowania schedulera.
+    new_rows = list(db.scalars(
         select(NewsItemORM)
         .where(
             NewsItemORM.asset_id == asset_id,
-            ~exists().where(NewsNLPRunORM.news_id == NewsItemORM.id),
+            ~has_any_run,
         )
         .order_by(NewsItemORM.published_at.desc())
         .limit(limit)
-    ).all()
+    ).all())
+    upgrade_budget = settings.nlp_upgrade_per_asset_cycle if upgrade_limit is None else upgrade_limit
+    upgrade_limit = min(
+        max(0, limit - len(new_rows)),
+        max(0, upgrade_budget),
+    )
+    upgrade_rows = list(db.scalars(
+        select(NewsItemORM)
+        .where(
+            NewsItemORM.asset_id == asset_id,
+            NewsItemORM.published_at >= now_utc() - timedelta(days=settings.nlp_reprocess_days),
+            has_any_run,
+            ~has_current_run,
+        )
+        .order_by(NewsItemORM.published_at.desc())
+        .limit(upgrade_limit)
+    ).all()) if upgrade_limit else []
 
     enriched = 0
-    for row in unenriched_rows:
+    for row in [*new_rows, *upgrade_rows]:
         item = news_to_schema(row)
         text = f"{item.title}\n\n{item.body}"
         payload = build_nlp_payload(text, asset.name, asset.symbol, AssetType(asset.type), sector=asset_row.sector)
@@ -71,7 +104,7 @@ def get_news_nlp_response(db: Session, news_id: str) -> NewsNLPResponse | None:
     run = get_latest_nlp_run(db, news_id)
     if run is None:
         return None
-    preds = list_narrative_predictions(db, news_id)
+    preds = list_narrative_predictions(db, news_id, model_name=run.model_name)
     return NewsNLPResponse(
         news_id=run.news_id,
         model_name=run.model_name,

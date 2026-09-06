@@ -437,6 +437,23 @@ export function Hero({
   const trainedModels = mlModels.filter(m => m.is_active);
   const mlMode = mlStatus?.ml_mode ?? "heuristic";
   const mlModeLabel = mlMode === "ml" ? "ML" : mlMode === "ml_partial" ? "MIX" : mlMode === "emergency_off" ? "OFF" : "HEU";
+  const eligibleModels = mlStatus?.eligible_models ?? 0;
+  const activeModels = mlStatus?.active_models ?? trainedModels.length;
+  const outcomeSamples = mlStatus?.outcome_samples ?? 0;
+  const minOutcomeSamples = mlStatus?.min_outcome_samples ?? 0;
+  const awaitingEvidence = mlMode === "heuristic" && activeModels > 0 && minOutcomeSamples > 0;
+  const mlBadgeValue = mlMode === "emergency_off"
+    ? "blokada"
+    : awaitingEvidence
+      ? `wyniki ${outcomeSamples}/${minOutcomeSamples}`
+      : `live ${eligibleModels}/${activeModels}`;
+  const mlBadgeColor = mlMode === "ml"
+    ? "var(--ok)"
+    : mlMode === "ml_partial"
+      ? "var(--warn)"
+      : mlMode === "emergency_off"
+        ? "#dc2626"
+        : "#d97706";
 
   return (
     <div className="sticky-bar">
@@ -511,16 +528,16 @@ export function Hero({
       <div className="sticky-sep" />
 
       {/* ML models */}
-      <div className="sticky-models" title={`Automatyczna aktywacja ML: live ${mlStatus?.eligible_models ?? 0}/${mlStatus?.active_models ?? 0}, shadow ${mlStatus?.shadow_models ?? 0}, degraded ${mlStatus?.degraded_models ?? 0}`}>
+      <div className="sticky-models" title={`Automatyczna aktywacja ML: live ${eligibleModels}/${activeModels}, najlepszy postęp wyników ${outcomeSamples}/${minOutcomeSamples}, shadow ${mlStatus?.shadow_models ?? 0}, degraded ${mlStatus?.degraded_models ?? 0}`}>
         <Cpu size={13} />
         <span className="sticky-ml-badge" style={{
-          background: trainedModels.length ? "rgba(22,163,74,.15)" : "rgba(148,163,184,.15)",
-          color: trainedModels.length ? "var(--ok)" : "var(--text-3)",
+          background: trainedModels.length ? "rgba(217,119,6,.14)" : "rgba(148,163,184,.15)",
+          color: trainedModels.length ? mlBadgeColor : "var(--text-3)",
         }}>
-          {mlModeLabel} · {mlStatus?.eligible_models ?? 0}/{mlStatus?.active_models ?? trainedModels.length}
+          {mlModeLabel} · {mlBadgeValue}
         </span>
         {(mlStatus?.targets ?? []).map(t => (
-          <span key={t.target_name} title={`${t.target_label}: ${t.activation_state}`}
+          <span key={t.target_name} title={`${t.target_label}: ${t.activation_state}, wyniki ${t.outcome_samples}/${t.min_outcome_samples}`}
             style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
               background: t.activation_state === "eligible" ? "var(--ok)" : t.activation_state === "degraded" ? "#dc2626" : t.is_trained ? "#d97706" : "rgba(148,163,184,.4)" }} />
         ))}

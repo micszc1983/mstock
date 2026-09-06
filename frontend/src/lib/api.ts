@@ -455,7 +455,15 @@ export const api = {
     postJson<{ started: boolean; message: string }>(`${_activeBase}/sync/insider`),
 
   portfolioPositions: () =>
-    fetchJson<{ asset_id: string; quantity: number; avg_buy_price: number | null }[]>(
+    fetchJson<{
+      asset_id: string;
+      quantity: number;
+      avg_buy_price: number | null;
+      purchase_date: string | null;
+      invested_amount: number | null;
+      cost_currency: "PLN";
+      updated_at: string;
+    }[]>(
       `${_activeBase}/portfolio/positions`
     ),
 

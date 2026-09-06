@@ -67,10 +67,13 @@ def get_latest_nlp_run(db: Session, news_id: str) -> NewsNLPRunORM | None:
     return db.scalar(stmt)
 
 
-def list_narrative_predictions(db: Session, news_id: str) -> list[NewsNarrativePredictionORM]:
-    stmt = (
-        select(NewsNarrativePredictionORM)
-        .where(NewsNarrativePredictionORM.news_id == news_id)
-        .order_by(NewsNarrativePredictionORM.score.desc())
-    )
+def list_narrative_predictions(
+    db: Session,
+    news_id: str,
+    model_name: str | None = None,
+) -> list[NewsNarrativePredictionORM]:
+    stmt = select(NewsNarrativePredictionORM).where(NewsNarrativePredictionORM.news_id == news_id)
+    if model_name is not None:
+        stmt = stmt.where(NewsNarrativePredictionORM.model_name == model_name)
+    stmt = stmt.order_by(NewsNarrativePredictionORM.score.desc())
     return db.scalars(stmt).all()

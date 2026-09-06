@@ -28,6 +28,9 @@ _DEFAULTS: dict[str, Any] = {
     "top_picks_sms": {
         "enabled": True,
     },
+    "paper_trading_sms": {
+        "enabled": True,
+    },
     "portfolio_sell_urgent": {
         "enabled": True,
         "cooldown_minutes": 360,
